@@ -15,7 +15,7 @@ global:
       version: "1.65.2"
       env:
         RCLONE_CONFIG_MYS3_TYPE: s3
-        RCLONE_CONFIG_MYS3_PROVIDER: Digitalocean #Digitalocean
+        RCLONE_CONFIG_MYS3_PROVIDER: Digitalocean
         RCLONE_CONFIG_MYS3_ACL: private
         RCLONE_CONFIG_MYS3_ENDPOINT: $S3_ENDPOINT_URL
         RCLONE_CONFIG_MYS3_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
