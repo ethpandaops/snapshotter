@@ -130,7 +130,7 @@ func (client *SSHClient) GetSyncStatusCL() (*types.BeaconV1NodeSyncing, error) {
 func (client *SSHClient) DumpLatestBlockToFile(filePath string) error {
 	cmd := fmt.Sprintf(`
 	curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",true],"id":1}' http://localhost:8545 |
-	jq -r ".result" | sudo tee %s`, filePath)
+	jq -r "." | sudo tee %s`, filePath)
 	out, err := client.RunCommand(cmd)
 	if err != nil {
 		log.WithError(err).WithFields(log.Fields{

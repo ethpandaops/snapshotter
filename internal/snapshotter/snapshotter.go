@@ -346,6 +346,8 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 	}
 	log.Info("stopped snooper across targets")
 
+	time.Sleep(30 * time.Second)
+
 	// Check if EL blocks are really all the same
 	blockResults := make(chan uint64, len(s.sshTargets))
 	var wg sync.WaitGroup
