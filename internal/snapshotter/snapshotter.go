@@ -25,11 +25,6 @@ type sshTarget struct {
 	cfg    *config.SSHTargetConfig
 }
 
-type ELSnapshotInfo struct {
-	blockHeight    uint64
-	blockHeightHex string
-}
-
 type Status struct {
 	ProcessedBlockHeight          uint64
 	NextPeriodSnapshotBlockHeight uint64
@@ -274,7 +269,9 @@ func (s *SnapShotter) StartPeriodicPolling() {
 						"block_interval": s.cfg.Global.Snapshots.BlockInterval,
 					}).Info("reached block to be snapshotted")
 
-					s.CreateSnapshot()
+					if err := s.CreateSnapshot(); err != nil {
+						log.WithError(err).Error("failed to create snapshot")
+					}
 
 					if s.cfg.Global.Snapshots.RunOnce {
 						log.Info("snapshot.run_once is true. shutting down")
@@ -314,10 +311,10 @@ func (s *SnapShotter) CreateSnapshot() error {
 	if err != nil {
 		log.WithError(err).Error("failed to prepare for snapshot")
 	} else {
-		//err = s.UploadSnapshot()
-		//if err != nil {
-		//	log.WithError(err).Error("failed to upload snapshot data")
-		//}
+		err = s.UploadSnapshot()
+		if err != nil {
+			log.WithError(err).Error("failed to upload snapshot data")
+		}
 	}
 
 	err = s.PostSnapshotStart()
