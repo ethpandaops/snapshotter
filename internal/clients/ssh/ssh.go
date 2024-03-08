@@ -251,7 +251,7 @@ func (client *SSHClient) StartDockerContainer(name string) error {
 }
 
 func (client *SSHClient) StopSnooper() error {
-	return client.StopDockerContainerWithForce("snooper-engine", true)
+	return client.StopDockerContainerWithForce(client.TargetConfig.DockerContainers.EngineSnooper, true)
 }
 
 func (client *SSHClient) StartSnooper() error {
