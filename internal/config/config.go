@@ -32,17 +32,26 @@ type Config struct {
 }
 
 type SSHTargetConfig struct {
-	Alias        string `yaml:"alias"`
-	Host         string `yaml:"host"`
-	User         string `yaml:"user"`
-	Port         int    `yaml:"port"`
-	DataDir      string `yaml:"data_dir"`
-	UploadPrefix string `yaml:"upload_prefix"`
+	Alias            string `yaml:"alias"`
+	Host             string `yaml:"host"`
+	User             string `yaml:"user"`
+	Port             int    `yaml:"port"`
+	DataDir          string `yaml:"data_dir"`
+	UploadPrefix     string `yaml:"upload_prefix"`
+	DockerContainers struct {
+		EngineSnooper string `yaml:"engine_snooper"`
+		Execution     string `yaml:"execution"`
+	} `yaml:"docker_containers"`
+	Endpoints struct {
+		Beacon    string `yaml:"beacon"`
+		Execution string `yaml:"execution"`
+	} `yaml:"endpoints"`
 }
 
 type RCloneConfig struct {
 	Env             map[string]string `yaml:"env"`
 	Version         string            `yaml:"version"`
+	Entrypoint      string            `yaml:"entrypoint"`
 	CommandTemplate string            `yaml:"cmd_template"`
 }
 

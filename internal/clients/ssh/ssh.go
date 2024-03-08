@@ -21,12 +21,11 @@ import (
 
 type SSHClient struct {
 	Config       *ssh.ClientConfig
-	Host         string
-	Port         int
+	TargetConfig *config.SSHTargetConfig
 	RCloneConfig *config.RCloneConfig
 }
 
-func NewSSHClient(user, host, privateKeyPath, privateKeyPassphrasePath, knowHostsPath string, port int, ignoreHostKeyCheck bool, useAgent bool, rclone *config.RCloneConfig) *SSHClient {
+func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string, ignoreHostKeyCheck bool, useAgent bool, rclone *config.RCloneConfig, target *config.SSHTargetConfig) *SSHClient {
 
 	var hostkeyCallback ssh.HostKeyCallback
 	hostkeyCallback, err := knownhosts.New(os.ExpandEnv(knowHostsPath))
@@ -76,21 +75,20 @@ func NewSSHClient(user, host, privateKeyPath, privateKeyPassphrasePath, knowHost
 	}
 
 	config := &ssh.ClientConfig{
-		User:            user,
+		User:            target.User,
 		Auth:            auths,
 		HostKeyCallback: hostkeyCallback,
 	}
 
 	return &SSHClient{
 		Config:       config,
-		Host:         host,
-		Port:         port,
+		TargetConfig: target,
 		RCloneConfig: rclone,
 	}
 }
 
 func (client *SSHClient) RunCommand(cmd string) (string, error) {
-	connection, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", client.Host, client.Port), client.Config)
+	connection, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", client.TargetConfig.Host, client.TargetConfig.Port), client.Config)
 	if err != nil {
 		return "", err
 	}
@@ -111,11 +109,14 @@ func (client *SSHClient) RunCommand(cmd string) (string, error) {
 }
 
 func (client *SSHClient) GetSyncStatusCL() (*types.BeaconV1NodeSyncing, error) {
-	out, err := client.RunCommand(`bash -ac "
-		curl -s http://localhost:5052/eth/v1/node/syncing | jq -r ".data"
-	"`)
+	out, err := client.RunCommand(fmt.Sprintf(`bash -ac "
+		curl -s %s/eth/v1/node/syncing | jq -r ".data"
+	"`, client.TargetConfig.Endpoints.Beacon))
 	if err != nil {
-		log.WithError(err).Warn("failed getting CL sync status")
+		log.WithFields(log.Fields{
+			"err":  err,
+			"host": client.TargetConfig.Alias,
+		}).Warn("failed getting CL sync status")
 		return nil, err
 	}
 
@@ -129,8 +130,23 @@ func (client *SSHClient) GetSyncStatusCL() (*types.BeaconV1NodeSyncing, error) {
 
 func (client *SSHClient) DumpLatestBlockToFile(filePath string) error {
 	cmd := fmt.Sprintf(`
-	curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",true],"id":1}' http://localhost:8545 |
-	jq -r "." | sudo tee %s`, filePath)
+	curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",true],"id":1}' %s |
+	jq -r "." | sudo tee %s`, client.TargetConfig.Endpoints.Execution, filePath)
+	out, err := client.RunCommand(cmd)
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"filePath": filePath,
+			"out":      out,
+		}).Error("failed to dump latest block info to file")
+		return err
+	}
+	return nil
+}
+
+func (client *SSHClient) DumpExecutionRPCRequestToFile(payload, filePath string) error {
+	cmd := fmt.Sprintf(`
+	curl -s -X POST -H "Content-Type: application/json" --data '%s' %s |
+	jq -r "." | sudo tee %s`, payload, client.TargetConfig.Endpoints.Execution, filePath)
 	out, err := client.RunCommand(cmd)
 	if err != nil {
 		log.WithError(err).WithFields(log.Fields{
@@ -143,9 +159,9 @@ func (client *SSHClient) DumpLatestBlockToFile(filePath string) error {
 }
 
 func (client *SSHClient) GetSyncStatusEL() (bool, error) {
-	out, err := client.RunCommand(`
-		curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' http://localhost:8545 | jq -r ".result"
-	`)
+	out, err := client.RunCommand(fmt.Sprintf(`
+		curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' %s | jq -r ".result"
+	`, client.TargetConfig.Endpoints.Execution))
 	if err != nil {
 		log.WithError(err).Warn("failed getting EL sync status")
 	}
@@ -173,9 +189,9 @@ func (client *SSHClient) GetSyncStatusEL() (bool, error) {
 }
 
 func (client *SSHClient) GetELBlockNumber() (string, error) {
-	out, err := client.RunCommand(`
-		curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' http://localhost:8545 | jq -r ".result"
-	`)
+	out, err := client.RunCommand(fmt.Sprintf(`
+		curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' %s | jq -r ".result"
+	`, client.TargetConfig.Endpoints.Execution))
 	if err != nil {
 		log.WithError(err).Warn("failed getting EL block")
 		return "", err
@@ -184,9 +200,9 @@ func (client *SSHClient) GetELBlockNumber() (string, error) {
 }
 
 func (client *SSHClient) GetELChainID() (string, error) {
-	out, err := client.RunCommand(`
-		curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' http://localhost:8545 | jq -r ".result"
-	`)
+	out, err := client.RunCommand(fmt.Sprintf(`
+		curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' %s | jq -r ".result"
+	`, client.TargetConfig.Endpoints.Execution))
 	if err != nil {
 		log.WithError(err).WithField("output", out).Warn("failed getting EL chain id")
 		return "", err
@@ -205,7 +221,7 @@ func (client *SSHClient) StopDockerContainerWithForce(name string, force bool) e
 	}
 	out, err := client.RunCommand(fmt.Sprintf(`docker stop %s "%s"`, args, name))
 	log.WithFields(log.Fields{
-		"host":      client.Host,
+		"host":      client.TargetConfig.Alias,
 		"container": name,
 	}).Debug("stopping docker container")
 	if err != nil {
@@ -221,7 +237,7 @@ func (client *SSHClient) StopDockerContainerWithForce(name string, force bool) e
 func (client *SSHClient) StartDockerContainer(name string) error {
 	out, err := client.RunCommand(fmt.Sprintf(`docker start "%s"`, name))
 	log.WithFields(log.Fields{
-		"host":      client.Host,
+		"host":      client.TargetConfig.Alias,
 		"container": name,
 	}).Debug("starting docker container")
 	if err != nil {
@@ -239,28 +255,23 @@ func (client *SSHClient) StopSnooper() error {
 }
 
 func (client *SSHClient) StartSnooper() error {
-	return client.StartDockerContainer("snooper-engine")
-}
-
-func (client *SSHClient) StopCL() error {
-	return client.StopDockerContainer("beacon")
-}
-
-func (client *SSHClient) StartCL() error {
-	return client.StartDockerContainer("beacon")
+	return client.StartDockerContainer(client.TargetConfig.DockerContainers.EngineSnooper)
 }
 
 func (client *SSHClient) StopEL() error {
-	return client.StopDockerContainer("execution")
+	return client.StopDockerContainer(client.TargetConfig.DockerContainers.Execution)
 }
 
 func (client *SSHClient) StartEL() error {
-	return client.StartDockerContainer("execution")
+	return client.StartDockerContainer(client.TargetConfig.DockerContainers.Execution)
 }
 
 func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPathPrefix string) error {
 	cmd := "docker run --rm" +
 		" -v " + srcDir + ":" + srcDir
+	if client.RCloneConfig.Entrypoint != "" {
+		cmd += " --entrypoint " + client.RCloneConfig.Entrypoint
+	}
 	for k, v := range client.RCloneConfig.Env {
 		cmd += fmt.Sprintf(" -e %s=%s", k, v)
 	}

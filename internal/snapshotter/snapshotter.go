@@ -41,7 +41,7 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 	log.WithFields(log.Fields{
 		"check_interval_seconds": cfg.Global.Snapshots.CheckIntervalSeconds,
 		"block_interval":         cfg.Global.Snapshots.BlockInterval,
-		"run_once":               cfg.Global.Snapshots.BlockInterval,
+		"run_once":               cfg.Global.Snapshots.RunOnce,
 	}).Info("snapshot config")
 
 	ss := SnapShotter{
@@ -55,15 +55,13 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 		tt := t
 		sshTargets[i] = &sshTarget{
 			client: sshClient.NewSSHClient(
-				t.User,
-				t.Host,
 				cfg.Global.SSH.PrivateKeyPath,
 				cfg.Global.SSH.PrivateKeyPassphrasePath,
 				cfg.Global.SSH.KnownHostsPath,
-				t.Port,
 				cfg.Global.SSH.InsecureIgnoreHostKey,
 				cfg.Global.SSH.UseAgent,
 				&cfg.Global.Snapshots.RClone,
+				&cfg.Targets.SSH[i],
 			),
 			cfg: &tt,
 		}
@@ -87,13 +85,13 @@ func (s *SnapShotter) initValidations() {
 			defer wg.Done()
 			chain, err := cl.GetELChainID()
 			if err != nil {
-				log.WithError(err).Fatalf("could not get chain Id from %s", cl.Host)
+				log.WithError(err).Fatalf("could not get chain Id from %s", cl.TargetConfig.Alias)
 			}
 			if chain != s.cfg.Global.ChainID {
-				log.Fatalf("chain id missmatch for host %s . got %s expected %s", cl.Host, chain, s.cfg.Global.ChainID)
+				log.Fatalf("chain id missmatch for host %s . got %s expected %s", cl.TargetConfig.Alias, chain, s.cfg.Global.ChainID)
 			}
 			log.WithFields(log.Fields{
-				"node":    cl.Host,
+				"node":    cl.TargetConfig.Alias,
 				"chainID": chain,
 			}).Info("got correct chain ID from target")
 		}()
@@ -117,12 +115,15 @@ func (s *SnapShotter) VerifyTargetsAreSynced() (bool, uint64) {
 				defer wg.Done()
 				status, err := cl.GetSyncStatusCL()
 				if err != nil {
-					log.Error("failed getting CL sync status")
+					log.WithFields(log.Fields{
+						"host": cl.TargetConfig.Alias,
+						"err":  err,
+					}).Warn("failed getting sync status")
 					syncResults <- false
 					return
 				}
 				log.WithFields(log.Fields{
-					"host":          cl.Host,
+					"host":          cl.TargetConfig.Alias,
 					"is_syncing":    status.IsSyncing,
 					"is_optimistic": status.IsOptimistic,
 					"sync_distance": status.SyncDistance,
@@ -132,7 +133,7 @@ func (s *SnapShotter) VerifyTargetsAreSynced() (bool, uint64) {
 				if status.IsSyncing {
 					log.WithFields(log.Fields{
 						"alias": tt.cfg.Alias,
-						"host":  cl.Host,
+						"host":  cl.TargetConfig.Alias,
 					}).Warn("CL is syncing")
 					syncResults <- false
 					return
@@ -140,7 +141,7 @@ func (s *SnapShotter) VerifyTargetsAreSynced() (bool, uint64) {
 				if status.IsOptimistic {
 					log.WithFields(log.Fields{
 						"alias": tt.cfg.Alias,
-						"host":  cl.Host,
+						"host":  cl.TargetConfig.Alias,
 					}).Warn("CL is running in optimistic mode")
 					syncResults <- false
 					return
@@ -148,7 +149,7 @@ func (s *SnapShotter) VerifyTargetsAreSynced() (bool, uint64) {
 				if status.ElOffline {
 					log.WithFields(log.Fields{
 						"alias": tt.cfg.Alias,
-						"host":  cl.Host,
+						"host":  cl.TargetConfig.Alias,
 					}).Warn("CL can't connect to the EL")
 					syncResults <- false
 					return
@@ -157,7 +158,7 @@ func (s *SnapShotter) VerifyTargetsAreSynced() (bool, uint64) {
 				if sd > 1 {
 					log.WithFields(log.Fields{
 						"alias":         tt.cfg.Alias,
-						"host":          cl.Host,
+						"host":          cl.TargetConfig.Alias,
 						"sync_distance": status.SyncDistance,
 						"head_slot":     status.HeadSlot,
 					}).Warn("CL sync distance is > 1")
@@ -178,7 +179,7 @@ func (s *SnapShotter) VerifyTargetsAreSynced() (bool, uint64) {
 				}
 				log.WithFields(log.Fields{
 					"alias": tt.cfg.Alias,
-					"host":  cl.Host,
+					"host":  cl.TargetConfig.Alias,
 					"sync":  syncing,
 				}).Debug("got EL sync status")
 				syncResults <- true
@@ -198,7 +199,7 @@ func (s *SnapShotter) VerifyTargetsAreSynced() (bool, uint64) {
 
 				log.WithFields(log.Fields{
 					"alias":        tt.cfg.Alias,
-					"host":         cl.Host,
+					"host":         cl.TargetConfig.Alias,
 					"el_block_hex": elBlockNumberHex,
 					"el_block_dec": elBlockNumberDec,
 				}).Debug("got EL block number")
@@ -279,6 +280,10 @@ func (s *SnapShotter) StartPeriodicPolling() {
 						log.Info("snapshot.run_once is true. shutting down")
 						os.Exit(0)
 					}
+
+					waitSecs := 60
+					log.Infof("waiting %d seconds for next run", waitSecs)
+					time.Sleep(time.Duration(waitSecs) * time.Second)
 				}
 
 			}
@@ -309,10 +314,10 @@ func (s *SnapShotter) CreateSnapshot() error {
 	if err != nil {
 		log.WithError(err).Error("failed to prepare for snapshot")
 	} else {
-		err = s.UploadSnapshot()
-		if err != nil {
-			log.WithError(err).Error("failed to upload snapshot data")
-		}
+		//err = s.UploadSnapshot()
+		//if err != nil {
+		//	log.WithError(err).Error("failed to upload snapshot data")
+		//}
 	}
 
 	err = s.PostSnapshotStart()
@@ -320,9 +325,6 @@ func (s *SnapShotter) CreateSnapshot() error {
 		log.WithError(err).Error("failed to restore service after snapshot")
 	}
 
-	waitSecs := 60
-	log.Infof("waiting %d seconds for next run", waitSecs)
-	time.Sleep(time.Duration(waitSecs) * time.Second)
 	return nil
 }
 
@@ -335,7 +337,7 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 		group.Go(func() error {
 			err := cl.StopSnooper()
 			if err != nil {
-				log.WithError(err).Errorf("could not stop snooper  %s", cl.Host)
+				log.WithError(err).Errorf("could not stop snooper  %s", cl.TargetConfig.Alias)
 				return err
 			}
 			return nil
@@ -346,6 +348,7 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 	}
 	log.Info("stopped snooper across targets")
 
+	log.Info("waiting to start checking checking if all nodes are still on the same block ")
 	time.Sleep(30 * time.Second)
 
 	// Check if EL blocks are really all the same
@@ -365,7 +368,7 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 			elBlockNumberDec, _ := hexutil.DecodeUint64(elBlockNumberHex)
 
 			log.WithFields(log.Fields{
-				"host":         cl.Host,
+				"host":         cl.TargetConfig.Alias,
 				"el_block_hex": elBlockNumberHex,
 				"el_block_dec": elBlockNumberDec,
 			}).Debug("got EL block number")
@@ -390,15 +393,20 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 	log.WithField("block", block).Info("all target ELs are at the same block")
 
 	// Dump block info to file
-	log.Info("dumping latest block info to file")
+	log.Info("dumping snapshot metadata to files")
 	group = errgroup.Group{}
 	for _, t := range s.sshTargets {
 		cl := t.client
 		tt := t
 		group.Go(func() error {
-			err := cl.DumpLatestBlockToFile(tt.cfg.DataDir + "/latest_snapshot_block.json")
+			err := cl.DumpExecutionRPCRequestToFile(`{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",true],"id":1}`, tt.cfg.DataDir+"/_snapshot_eth_getBlockByNumber.json")
 			if err != nil {
-				log.WithError(err).Errorf("could not dump latest block info to file %s", cl.Host)
+				log.WithError(err).Errorf("could not dump eth_getBlockByNumber to file %s", cl.TargetConfig.Alias)
+				return err
+			}
+			err = cl.DumpExecutionRPCRequestToFile(`{"jsonrpc":"2.0","method":"web3_clientVersion","params":[],"id":1}`, tt.cfg.DataDir+"/_snapshot_web3_clientVersion.json")
+			if err != nil {
+				log.WithError(err).Errorf("could not dump web3_clientVersion to file %s", cl.TargetConfig.Alias)
 				return err
 			}
 			return nil
@@ -416,7 +424,7 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 		group.Go(func() error {
 			err := cl.StopEL()
 			if err != nil {
-				log.WithError(err).Errorf("could not stop EL %s", cl.Host)
+				log.WithError(err).Errorf("could not stop EL %s", cl.TargetConfig.Alias)
 				return err
 			}
 			return nil
@@ -439,7 +447,7 @@ func (s *SnapShotter) PostSnapshotStart() error {
 		group.Go(func() error {
 			err := cl.StartSnooper()
 			if err != nil {
-				log.WithError(err).Errorf("could not start snooper  %s", cl.Host)
+				log.WithError(err).Errorf("could not start snooper  %s", cl.TargetConfig.Alias)
 				return err
 			}
 			return nil
@@ -458,7 +466,7 @@ func (s *SnapShotter) PostSnapshotStart() error {
 		group.Go(func() error {
 			err := cl.StartEL()
 			if err != nil {
-				log.WithError(err).Errorf("could not start EL  %s", cl.Host)
+				log.WithError(err).Errorf("could not start EL  %s", cl.TargetConfig.Alias)
 				return err
 			}
 			return nil
@@ -483,7 +491,7 @@ func (s *SnapShotter) UploadSnapshot() error {
 
 			err := cl.RCloneSyncLocalToRemote(tt.cfg.DataDir, tt.cfg.UploadPrefix)
 			if err != nil {
-				log.WithError(err).Errorf("could not upload via rclone  %s", cl.Host)
+				log.WithError(err).Errorf("could not upload via rclone  %s", cl.TargetConfig.Alias)
 				return err
 			}
 			log.WithFields(log.Fields{
