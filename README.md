@@ -25,7 +25,7 @@ Check the tables below for all the possible combinations.
 
 ### Available snapshots
 
-#### Holesky
+#### [![Holesky](https://github.com/ethpandaops/snapshotter/actions/workflows/verify-holesky.yaml/badge.svg)](https://github.com/ethpandaops/snapshotter/actions/workflows/verify-holesky.yaml)
 
 Network | Client     | Snapshot                                                                                   | Block                                                                                                      | Client Version
 --------| ------     | -----                                                                                      | ---                                                                                                        | ---
@@ -35,7 +35,7 @@ Holesky | Nethermind | [📦 Download](https://snapshots.ethpandaops.io/holesky/
 Holesky | Reth       | [📦 Download](https://snapshots.ethpandaops.io/holesky/reth/latest/snapshot.tar.zst)       | [ℹ️ Block](https://snapshots.ethpandaops.io/holesky/reth/latest/_snapshot_eth_getBlockByNumber.json)       | [ℹ️ Client](https://snapshots.ethpandaops.io/holesky/reth/latest/_snapshot_web3_clientVersion.json)
 
 
-#### Sepolia
+#### [![Sepolia](https://github.com/ethpandaops/snapshotter/actions/workflows/verify-sepolia.yaml/badge.svg)](https://github.com/ethpandaops/snapshotter/actions/workflows/verify-sepolia.yaml)
 Network | Client     | Snapshot                                                                                   | Block                                                                                                      | Client Version
 --------| ------     | -----                                                                                      | ---                                                                                                        | ---
 Sepolia | Besu       | [📦 Download](https://snapshots.ethpandaops.io/sepolia/besu/latest/snapshot.tar.zst)       | [ℹ️ Block](https://snapshots.ethpandaops.io/sepolia/besu/latest/_snapshot_eth_getBlockByNumber.json)       | [ℹ️ Client](https://snapshots.ethpandaops.io/sepolia/besu/latest/_snapshot_web3_clientVersion.json)
