@@ -8,7 +8,7 @@ baseURL=${2:-https://snapshots.ethpandaops.io}
 block_numbers=()
 
 # List of clients
-clients=("geth" "besu" "nethermind" "reth")
+clients=("geth" "besu" "nethermind" "reth" "erigon")
 
 echo "Verifying snapshot block numbers for network: $network"
 
@@ -31,7 +31,11 @@ for i in "${!clients[@]}"; do
 done
 
 if [ "$all_same" = true ]; then
-  echo "✅ All block numbers are the same: https://${network}.etherscan.io/block/${first_block_number}"
+  EXPLORER_URL="https://${network}.etherscan.io/block/${first_block_number}"
+  if [ "$network" = "mainnet" ]; then
+    EXPLORER_URL="https://etherscan.io/block/${first_block_number}"
+  fi
+  echo "✅ All block numbers are the same: $EXPLORER_URL"
 else
   echo "❌ Some block numbers are different."
   exit 1
