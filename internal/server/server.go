@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/ethpandaops/eth-snapshotter/internal/config"
 	"github.com/ethpandaops/eth-snapshotter/internal/db"
@@ -37,14 +38,36 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
-	runs, err := s.db.GetAllRuns()
+	page := 1
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	limit := 20
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if limit > 20 {
+		limit = 20
+	}
+
+	offset := (page - 1) * limit
+	runs, err := s.db.GetPaginatedRuns(offset, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(runs)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"page":  page,
+		"limit": limit,
+		"runs":  runs,
+	})
 }
 
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {

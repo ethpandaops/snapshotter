@@ -276,3 +276,53 @@ func (d *DB) GetMostRecentRun() (*SnapshotRun, error) {
 
 	return &run, nil
 }
+
+func (d *DB) GetPaginatedRuns(offset, limit int) ([]SnapshotRun, error) {
+	if limit > 20 {
+		limit = 20
+	}
+
+	rows, err := d.db.Query(`
+		SELECT id, block_height, start_time, end_time, status, error_message, dry_run
+		FROM snapshot_runs
+		ORDER BY start_time DESC
+		LIMIT ? OFFSET ?
+	`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []SnapshotRun
+	for rows.Next() {
+		var run SnapshotRun
+		var endTime sql.NullTime
+		var errorMessage sql.NullString
+		err := rows.Scan(
+			&run.ID,
+			&run.BlockHeight,
+			&run.StartTime,
+			&endTime,
+			&run.Status,
+			&errorMessage,
+			&run.DryRun,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if endTime.Valid {
+			run.EndTime = endTime.Time
+		}
+		if errorMessage.Valid {
+			run.ErrorMessage = errorMessage.String
+		}
+
+		targets, err := d.GetTargetSnapshotsForRun(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		run.TargetsSnapshot = targets
+		runs = append(runs, run)
+	}
+	return runs, nil
+}
