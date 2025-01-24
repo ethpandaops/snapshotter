@@ -3,6 +3,7 @@ package snapshotter
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	sshClient "github.com/ethpandaops/eth-snapshotter/internal/clients/ssh"
 	"github.com/ethpandaops/eth-snapshotter/internal/config"
+	"github.com/ethpandaops/eth-snapshotter/internal/db"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
@@ -18,6 +20,7 @@ type SnapShotter struct {
 	cfg        *config.Config
 	status     *Status
 	sshTargets []*sshTarget
+	db         *db.DB
 }
 
 type sshTarget struct {
@@ -39,9 +42,26 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 		"run_once":               cfg.Global.Snapshots.RunOnce,
 	}).Info("snapshot config")
 
+	dbPath := cfg.Global.Database.Path
+	if dbPath == "" {
+		dbPath = "/data/snapshots.db"
+	}
+
+	// Ensure directory exists
+	dbDir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+
+	db, err := db.NewDB(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	}
+
 	ss := SnapShotter{
 		cfg:    cfg,
 		status: &Status{},
+		db:     db,
 	}
 
 	sshTargets := make([]*sshTarget, len(cfg.Targets.SSH))
@@ -306,22 +326,33 @@ func (s *SnapShotter) CreateSnapshot() error {
 		s.status.Unlock()
 	}()
 
+	// Create snapshot run record
+	run, err := s.db.CreateSnapshotRun(s.status.ProcessedBlockHeight)
+	if err != nil {
+		log.WithError(err).Error("failed to create snapshot run record")
+		return err
+	}
+
 	log.Info("starting snapshot")
-	err := s.PrepareForSnapshot()
-	if err != nil {
+	if err := s.PrepareForSnapshot(); err != nil {
+		s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error())
 		log.WithError(err).Error("failed to prepare for snapshot")
-	} else {
-		err = s.UploadSnapshot()
-		if err != nil {
-			log.WithError(err).Error("failed to upload snapshot data")
-		}
+		return err
 	}
 
-	err = s.PostSnapshotStart()
-	if err != nil {
+	if err := s.UploadSnapshot(run.ID); err != nil {
+		s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error())
+		log.WithError(err).Error("failed to upload snapshot data")
+		return err
+	}
+
+	if err := s.PostSnapshotStart(); err != nil {
+		s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error())
 		log.WithError(err).Error("failed to restore service after snapshot")
+		return err
 	}
 
+	s.db.UpdateSnapshotRunStatus(run.ID, "success", "")
 	return nil
 }
 
@@ -477,20 +508,30 @@ func (s *SnapShotter) PostSnapshotStart() error {
 	return nil
 }
 
-func (s *SnapShotter) UploadSnapshot() error {
+func (s *SnapShotter) UploadSnapshot(runID int64) error {
 	t1 := time.Now()
 	log.Info("starting uploading data snapshots")
 	group := errgroup.Group{}
+
 	for _, t := range s.sshTargets {
 		cl := t.client
 		tt := t
-		group.Go(func() error {
 
+		targetSnapshot, err := s.db.CreateTargetSnapshot(runID, tt.cfg.Alias, tt.cfg.UploadPrefix)
+		if err != nil {
+			log.WithError(err).Error("failed to create target snapshot record")
+			continue
+		}
+
+		group.Go(func() error {
 			err := cl.RCloneSyncLocalToRemote(tt.cfg.DataDir, tt.cfg.UploadPrefix)
 			if err != nil {
-				log.WithError(err).Errorf("could not upload via rclone  %s", cl.TargetConfig.Alias)
+				s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "failed", err.Error())
+				log.WithError(err).Errorf("could not upload via rclone %s", cl.TargetConfig.Alias)
 				return err
 			}
+
+			s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", "")
 			log.WithFields(log.Fields{
 				"alias":       tt.cfg.Alias,
 				"uploaded_to": tt.cfg.UploadPrefix,
@@ -500,9 +541,11 @@ func (s *SnapShotter) UploadSnapshot() error {
 			return nil
 		})
 	}
+
 	if err := group.Wait(); err != nil {
 		return err
 	}
+
 	log.WithFields(log.Fields{
 		"took": time.Since(t1),
 	}).Info("finished uploading all data snapshots")

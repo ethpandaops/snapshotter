@@ -7,6 +7,7 @@ require (
 	github.com/ethereum/go-ethereum v1.13.11 // indirect
 	github.com/holiman/uint256 v1.2.4 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/mattn/go-sqlite3 v1.14.24 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/cobra v1.8.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect

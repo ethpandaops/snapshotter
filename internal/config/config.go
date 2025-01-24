@@ -25,6 +25,9 @@ type Config struct {
 			RunOnce              bool         `yaml:"run_once"`
 			RClone               RCloneConfig `yaml:"rclone"`
 		} `yaml:"snapshots"`
+		Database struct {
+			Path string `yaml:"path"`
+		} `yaml:"database"`
 	} `yaml:"global"`
 	Targets struct {
 		SSH []SSHTargetConfig `yaml:"ssh"`
