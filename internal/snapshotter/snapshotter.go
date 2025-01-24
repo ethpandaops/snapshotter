@@ -289,8 +289,12 @@ func (s *SnapShotter) StartPeriodicPolling() {
 						"block_interval": s.cfg.Global.Snapshots.BlockInterval,
 					}).Info("reached block to be snapshotted")
 
-					if err := s.CreateSnapshot(); err != nil {
-						log.WithError(err).Error("failed to create snapshot")
+					if s.cfg.Global.Snapshots.DryRun {
+						log.Info("dry run mode enabled - skipping snapshot creation")
+					} else {
+						if err := s.CreateSnapshot(); err != nil {
+							log.WithError(err).Error("failed to create snapshot")
+						}
 					}
 
 					if s.cfg.Global.Snapshots.RunOnce {
@@ -302,7 +306,6 @@ func (s *SnapShotter) StartPeriodicPolling() {
 					log.Infof("waiting %d seconds for next run", waitSecs)
 					time.Sleep(time.Duration(waitSecs) * time.Second)
 				}
-
 			}
 
 		case <-quit:
