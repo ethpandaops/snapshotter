@@ -44,7 +44,7 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 
 	dbPath := cfg.Global.Database.Path
 	if dbPath == "" {
-		dbPath = "/data/snapshots.db"
+		dbPath = "snapshots.db"
 	}
 
 	// Ensure directory exists
@@ -288,13 +288,8 @@ func (s *SnapShotter) StartPeriodicPolling() {
 						"block":          blockNumber,
 						"block_interval": s.cfg.Global.Snapshots.BlockInterval,
 					}).Info("reached block to be snapshotted")
-
-					if s.cfg.Global.Snapshots.DryRun {
-						log.Info("dry run mode enabled - skipping snapshot creation")
-					} else {
-						if err := s.CreateSnapshot(); err != nil {
-							log.WithError(err).Error("failed to create snapshot")
-						}
+					if err := s.CreateSnapshot(); err != nil {
+						log.WithError(err).Error("failed to create snapshot")
 					}
 
 					if s.cfg.Global.Snapshots.RunOnce {
@@ -330,13 +325,18 @@ func (s *SnapShotter) CreateSnapshot() error {
 	}()
 
 	// Create snapshot run record
-	run, err := s.db.CreateSnapshotRun(s.status.ProcessedBlockHeight)
+	run, err := s.db.CreateSnapshotRun(s.status.ProcessedBlockHeight, s.cfg.Global.Snapshots.DryRun)
 	if err != nil {
 		log.WithError(err).Error("failed to create snapshot run record")
 		return err
 	}
 
-	log.Info("starting snapshot")
+	log.WithFields(log.Fields{
+		"run_id":  run.ID,
+		"block":   run.BlockHeight,
+		"dry_run": run.DryRun,
+	}).Info("starting snapshot")
+
 	if err := s.PrepareForSnapshot(); err != nil {
 		s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error())
 		log.WithError(err).Error("failed to prepare for snapshot")
@@ -360,6 +360,11 @@ func (s *SnapShotter) CreateSnapshot() error {
 }
 
 func (s *SnapShotter) PrepareForSnapshot() error {
+	if s.cfg.Global.Snapshots.DryRun {
+		log.Warn("dry run mode enabled - skipping snapshot preparation")
+		return nil
+	}
+
 	// Stop snooper
 	log.Info("stopping snooper container across targets")
 	group := errgroup.Group{}
@@ -470,6 +475,11 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 }
 
 func (s *SnapShotter) PostSnapshotStart() error {
+	if s.cfg.Global.Snapshots.DryRun {
+		log.Warn("dry run mode enabled - skipping post snapshot sequence")
+		return nil
+	}
+
 	// Start snooper
 	log.Info("starting snooper container across targets")
 	group := errgroup.Group{}
@@ -520,9 +530,18 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 		cl := t.client
 		tt := t
 
-		targetSnapshot, err := s.db.CreateTargetSnapshot(runID, tt.cfg.Alias, tt.cfg.UploadPrefix)
+		targetSnapshot, err := s.db.CreateTargetSnapshot(runID, tt.cfg.Alias, tt.cfg.UploadPrefix, s.cfg.Global.Snapshots.DryRun)
 		if err != nil {
 			log.WithError(err).Error("failed to create target snapshot record")
+			continue
+		}
+
+		if s.cfg.Global.Snapshots.DryRun {
+			log.WithFields(log.Fields{
+				"alias":         tt.cfg.Alias,
+				"upload_prefix": tt.cfg.UploadPrefix,
+			}).Warn("dry run mode enabled - skipping snapshot upload")
+			s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", "")
 			continue
 		}
 
