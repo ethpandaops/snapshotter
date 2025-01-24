@@ -145,3 +145,134 @@ func (d *DB) UpdateTargetSnapshotStatus(id int64, status string, errorMsg string
 	)
 	return err
 }
+
+func (d *DB) GetTargetSnapshotsForRun(runID int64) ([]TargetSnapshot, error) {
+	rows, err := d.db.Query(`
+		SELECT id, snapshot_run_id, alias, upload_prefix, start_time, end_time, status, error_message, dry_run
+		FROM target_snapshots
+		WHERE snapshot_run_id = ?
+		ORDER BY start_time ASC
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var targets []TargetSnapshot
+	for rows.Next() {
+		var target TargetSnapshot
+		var endTime sql.NullTime
+		var errorMessage sql.NullString
+		err := rows.Scan(
+			&target.ID,
+			&target.SnapshotRunID,
+			&target.Alias,
+			&target.UploadPrefix,
+			&target.StartTime,
+			&endTime,
+			&target.Status,
+			&errorMessage,
+			&target.DryRun,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if endTime.Valid {
+			target.EndTime = endTime.Time
+		}
+		if errorMessage.Valid {
+			target.ErrorMessage = errorMessage.String
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+func (d *DB) GetAllRuns() ([]SnapshotRun, error) {
+	rows, err := d.db.Query(`
+		SELECT id, block_height, start_time, end_time, status, error_message, dry_run
+		FROM snapshot_runs
+		ORDER BY start_time DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []SnapshotRun
+	for rows.Next() {
+		var run SnapshotRun
+		var endTime sql.NullTime
+		var errorMessage sql.NullString
+		err := rows.Scan(
+			&run.ID,
+			&run.BlockHeight,
+			&run.StartTime,
+			&endTime,
+			&run.Status,
+			&errorMessage,
+			&run.DryRun,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if endTime.Valid {
+			run.EndTime = endTime.Time
+		}
+		if errorMessage.Valid {
+			run.ErrorMessage = errorMessage.String
+		}
+
+		// Get associated target snapshots
+		targets, err := d.GetTargetSnapshotsForRun(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		run.TargetsSnapshot = targets
+		runs = append(runs, run)
+	}
+	return runs, nil
+}
+
+func (d *DB) GetMostRecentRun() (*SnapshotRun, error) {
+	row := d.db.QueryRow(`
+		SELECT id, block_height, start_time, end_time, status, error_message, dry_run
+		FROM snapshot_runs
+		ORDER BY start_time DESC
+		LIMIT 1
+	`)
+
+	var run SnapshotRun
+	var endTime sql.NullTime
+	var errorMessage sql.NullString
+	err := row.Scan(
+		&run.ID,
+		&run.BlockHeight,
+		&run.StartTime,
+		&endTime,
+		&run.Status,
+		&errorMessage,
+		&run.DryRun,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if endTime.Valid {
+		run.EndTime = endTime.Time
+	}
+	if errorMessage.Valid {
+		run.ErrorMessage = errorMessage.String
+	}
+
+	targets, err := d.GetTargetSnapshotsForRun(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	run.TargetsSnapshot = targets
+
+	return &run, nil
+}

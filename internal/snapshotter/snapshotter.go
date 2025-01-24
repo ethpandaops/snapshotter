@@ -12,6 +12,7 @@ import (
 	sshClient "github.com/ethpandaops/eth-snapshotter/internal/clients/ssh"
 	"github.com/ethpandaops/eth-snapshotter/internal/config"
 	"github.com/ethpandaops/eth-snapshotter/internal/db"
+	"github.com/ethpandaops/eth-snapshotter/internal/server"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
@@ -21,6 +22,7 @@ type SnapShotter struct {
 	status     *Status
 	sshTargets []*sshTarget
 	db         *db.DB
+	server     *server.Server
 }
 
 type sshTarget struct {
@@ -63,6 +65,14 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 		status: &Status{},
 		db:     db,
 	}
+
+	// Initialize HTTP server
+	ss.server = server.New(cfg, db)
+	go func() {
+		if err := ss.server.Start(); err != nil {
+			log.WithError(err).Fatal("failed to start HTTP server")
+		}
+	}()
 
 	sshTargets := make([]*sshTarget, len(cfg.Targets.SSH))
 
@@ -355,6 +365,12 @@ func (s *SnapShotter) CreateSnapshot() error {
 		return err
 	}
 
+	if s.cfg.Global.Snapshots.DryRun {
+		log.WithFields(log.Fields{
+			"run_id": run.ID,
+		}).Warn("dry run mode enabled - waiting 60s to update run status")
+		time.Sleep(60 * time.Second)
+	}
 	s.db.UpdateSnapshotRunStatus(run.ID, "success", "")
 	return nil
 }
@@ -540,8 +556,11 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 			log.WithFields(log.Fields{
 				"alias":         tt.cfg.Alias,
 				"upload_prefix": tt.cfg.UploadPrefix,
-			}).Warn("dry run mode enabled - skipping snapshot upload")
-			s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", "")
+			}).Warn("dry run mode enabled - skipping snapshot upload and waiting 60s to mark as success")
+			go func() {
+				time.Sleep(60 * time.Second)
+				s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", "")
+			}()
 			continue
 		}
 

@@ -30,6 +30,9 @@ type Config struct {
 			Path string `yaml:"path"`
 		} `yaml:"database"`
 	} `yaml:"global"`
+	Server struct {
+		ListenAddr string `yaml:"listen_addr"`
+	} `yaml:"server"`
 	Targets struct {
 		SSH []SSHTargetConfig `yaml:"ssh"`
 	} `yaml:"targets"`
