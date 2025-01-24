@@ -534,6 +534,24 @@ func (s *SnapShotter) PostSnapshotStart() error {
 	}
 	log.Info("started EL across targets")
 
+	// Restart beacon
+	log.Info("restarting beacon container across targets")
+	group = errgroup.Group{}
+	for _, t := range s.sshTargets {
+		cl := t.client
+		group.Go(func() error {
+			err := cl.RestartBeacon()
+			if err != nil {
+				log.WithError(err).Errorf("could not restart beacon %s", cl.TargetConfig.Alias)
+				return err
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	log.Info("restarted beacon across targets")
 	return nil
 }
 

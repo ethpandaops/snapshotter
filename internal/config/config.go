@@ -48,6 +48,7 @@ type SSHTargetConfig struct {
 	DockerContainers struct {
 		EngineSnooper string `yaml:"engine_snooper"`
 		Execution     string `yaml:"execution"`
+		Beacon        string `yaml:"beacon"`
 	} `yaml:"docker_containers"`
 	Endpoints struct {
 		Beacon    string `yaml:"beacon"`
