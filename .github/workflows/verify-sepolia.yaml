@@ -1,4 +1,4 @@
-name: Verify Sepolia
+name: Verify - Sepolia
 
 on:
   schedule:
