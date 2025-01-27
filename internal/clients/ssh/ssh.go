@@ -266,6 +266,14 @@ func (client *SSHClient) StartEL() error {
 	return client.StartDockerContainer(client.TargetConfig.DockerContainers.Execution)
 }
 
+func (client *SSHClient) RestartBeacon() error {
+	err := client.StopDockerContainer(client.TargetConfig.DockerContainers.Beacon)
+	if err != nil {
+		return err
+	}
+	return client.StartDockerContainer(client.TargetConfig.DockerContainers.Beacon)
+}
+
 func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPathPrefix string) error {
 	cmd := "docker run --rm" +
 		" -v " + srcDir + ":" + srcDir

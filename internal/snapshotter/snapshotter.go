@@ -3,6 +3,7 @@ package snapshotter
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -10,26 +11,22 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	sshClient "github.com/ethpandaops/eth-snapshotter/internal/clients/ssh"
 	"github.com/ethpandaops/eth-snapshotter/internal/config"
+	"github.com/ethpandaops/eth-snapshotter/internal/db"
+	"github.com/ethpandaops/eth-snapshotter/internal/types"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
 type SnapShotter struct {
 	cfg        *config.Config
-	status     *Status
+	status     *types.SnapshotterStatus
 	sshTargets []*sshTarget
+	db         *db.DB
 }
 
 type sshTarget struct {
 	client *sshClient.SSHClient
 	cfg    *config.SSHTargetConfig
-}
-
-type Status struct {
-	ProcessedBlockHeight          uint64
-	NextPeriodSnapshotBlockHeight uint64
-	SnapshotInProgress            bool
-	sync.Mutex
 }
 
 func Init(cfg *config.Config) (*SnapShotter, error) {
@@ -39,9 +36,28 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 		"run_once":               cfg.Global.Snapshots.RunOnce,
 	}).Info("snapshot config")
 
+	dbPath := cfg.Global.Database.Path
+	if dbPath == "" {
+		dbPath = "snapshots.db"
+	}
+
+	// Ensure directory exists
+	dbDir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+
+	db, err := db.NewDB(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	}
+
 	ss := SnapShotter{
-		cfg:    cfg,
-		status: &Status{},
+		cfg: cfg,
+		status: &types.SnapshotterStatus{
+			BlockInterval: uint64(cfg.Global.Snapshots.BlockInterval),
+		},
+		db: db,
 	}
 
 	sshTargets := make([]*sshTarget, len(cfg.Targets.SSH))
@@ -69,6 +85,10 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 	ss.sshTargets = sshTargets
 
 	return &ss, nil
+}
+
+func (s *SnapShotter) GetStatus() *types.SnapshotterStatus {
+	return s.status
 }
 
 func (s *SnapShotter) initValidations() {
@@ -244,6 +264,15 @@ func checkIfAllSameResults(ch chan uint64) (bool, uint64) {
 	return isFirstValueSet, firstValue
 }
 
+// Add function that receives a block number and returns how many blocks are left to the next snapshot
+func (s *SnapShotter) BlocksLeftToNextSnapshot(blockNumber uint64) uint64 {
+	b := uint64(s.cfg.Global.Snapshots.BlockInterval) - (blockNumber % uint64(s.cfg.Global.Snapshots.BlockInterval))
+	if b == uint64(s.cfg.Global.Snapshots.BlockInterval) {
+		return 0
+	}
+	return b
+}
+
 func (s *SnapShotter) StartPeriodicPolling() {
 	ticker := time.NewTicker(time.Duration(s.cfg.Global.Snapshots.CheckIntervalSeconds) * time.Second)
 	quit := make(chan struct{})
@@ -254,21 +283,42 @@ func (s *SnapShotter) StartPeriodicPolling() {
 			t1 := time.Now()
 			allSynced, blockNumber := s.VerifyTargetsAreSynced()
 			if allSynced {
+				blocksLeft := s.BlocksLeftToNextSnapshot(blockNumber)
 				log.WithFields(log.Fields{
-					"block": blockNumber,
-					"took":  time.Since(t1),
+					"block_current":  blockNumber,
+					"block_next":     blockNumber + blocksLeft,
+					"blocks_left":    blocksLeft,
+					"block_interval": s.cfg.Global.Snapshots.BlockInterval,
+					"eta":            time.Duration(blocksLeft) * 12 * time.Second,
+					"took":           time.Since(t1),
 				}).Info("all targets are synced")
 				s.status.Lock()
 				s.status.ProcessedBlockHeight = blockNumber
-				s.status.NextPeriodSnapshotBlockHeight = blockNumber * (blockNumber / uint64(s.cfg.Global.Snapshots.BlockInterval))
+				s.status.NextSnapshotBlockHeight = blockNumber + blocksLeft
 				s.status.Unlock()
 
-				if blockNumber%uint64(s.cfg.Global.Snapshots.BlockInterval) == 0 {
+				run, err := s.db.GetMostRecentRun()
+				if err != nil {
+					log.WithError(err).Error("failed to get most recent run")
+				}
+
+				// If the most recent run is far away from the current block number, we need to create a new snapshot
+				lastRunIsTooOld := false
+				if blockNumber > run.BlockHeight+uint64(s.cfg.Global.Snapshots.BlockInterval) {
+					lastRunIsTooOld = true
+					log.WithFields(log.Fields{
+						"run_id":            run.ID,
+						"block_current":     blockNumber,
+						"block_last_run":    run.BlockHeight,
+						"should_have_block": run.BlockHeight + uint64(s.cfg.Global.Snapshots.BlockInterval),
+					}).Warn("most recent run is too old")
+				}
+
+				if blocksLeft == 0 || lastRunIsTooOld {
 					log.WithFields(log.Fields{
 						"block":          blockNumber,
 						"block_interval": s.cfg.Global.Snapshots.BlockInterval,
 					}).Info("reached block to be snapshotted")
-
 					if err := s.CreateSnapshot(); err != nil {
 						log.WithError(err).Error("failed to create snapshot")
 					}
@@ -282,7 +332,6 @@ func (s *SnapShotter) StartPeriodicPolling() {
 					log.Infof("waiting %d seconds for next run", waitSecs)
 					time.Sleep(time.Duration(waitSecs) * time.Second)
 				}
-
 			}
 
 		case <-quit:
@@ -306,26 +355,60 @@ func (s *SnapShotter) CreateSnapshot() error {
 		s.status.Unlock()
 	}()
 
-	log.Info("starting snapshot")
-	err := s.PrepareForSnapshot()
+	// Create snapshot run record
+	run, err := s.db.CreateSnapshotRun(s.status.ProcessedBlockHeight, s.cfg.Global.Snapshots.DryRun)
 	if err != nil {
-		log.WithError(err).Error("failed to prepare for snapshot")
-	} else {
-		err = s.UploadSnapshot()
-		if err != nil {
-			log.WithError(err).Error("failed to upload snapshot data")
+		log.WithError(err).Error("failed to create snapshot run record")
+		return err
+	}
+
+	log.WithFields(log.Fields{
+		"run_id":  run.ID,
+		"block":   run.BlockHeight,
+		"dry_run": run.DryRun,
+	}).Info("starting snapshot")
+
+	if err := s.PrepareForSnapshot(); err != nil {
+		if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error()); errDB != nil {
+			log.WithError(errDB).Error("failed to update snapshot run status")
 		}
+		return err
 	}
 
-	err = s.PostSnapshotStart()
-	if err != nil {
+	if err := s.UploadSnapshot(run.ID); err != nil {
+		if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error()); errDB != nil {
+			log.WithError(errDB).Error("failed to update snapshot run status")
+		}
+		log.WithError(err).Error("failed to upload snapshot data")
+		return err
+	}
+
+	if err := s.PostSnapshotStart(); err != nil {
+		if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error()); errDB != nil {
+			log.WithError(errDB).Error("failed to update snapshot run status")
+		}
 		log.WithError(err).Error("failed to restore service after snapshot")
+		return err
 	}
 
-	return nil
+	if s.cfg.Global.Snapshots.DryRun {
+		log.WithFields(log.Fields{
+			"run_id": run.ID,
+		}).Warn("dry run mode enabled - waiting 60s to update run status")
+		time.Sleep(60 * time.Second)
+	}
+	if err := s.db.UpdateSnapshotRunStatus(run.ID, "success", ""); err != nil {
+		log.WithError(err).Error("failed to update snapshot run status")
+	}
+	return err
 }
 
 func (s *SnapShotter) PrepareForSnapshot() error {
+	if s.cfg.Global.Snapshots.DryRun {
+		log.Warn("dry run mode enabled - skipping snapshot preparation")
+		return nil
+	}
+
 	// Stop snooper
 	log.Info("stopping snooper container across targets")
 	group := errgroup.Group{}
@@ -436,6 +519,11 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 }
 
 func (s *SnapShotter) PostSnapshotStart() error {
+	if s.cfg.Global.Snapshots.DryRun {
+		log.Warn("dry run mode enabled - skipping post snapshot sequence")
+		return nil
+	}
+
 	// Start snooper
 	log.Info("starting snooper container across targets")
 	group := errgroup.Group{}
@@ -474,22 +562,68 @@ func (s *SnapShotter) PostSnapshotStart() error {
 	}
 	log.Info("started EL across targets")
 
+	// Restart beacon
+	log.Info("restarting beacon container across targets")
+	group = errgroup.Group{}
+	for _, t := range s.sshTargets {
+		cl := t.client
+		group.Go(func() error {
+			err := cl.RestartBeacon()
+			if err != nil {
+				log.WithError(err).Errorf("could not restart beacon %s", cl.TargetConfig.Alias)
+				return err
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	log.Info("restarted beacon across targets")
 	return nil
 }
 
-func (s *SnapShotter) UploadSnapshot() error {
+func (s *SnapShotter) UploadSnapshot(runID int64) error {
 	t1 := time.Now()
 	log.Info("starting uploading data snapshots")
 	group := errgroup.Group{}
+
 	for _, t := range s.sshTargets {
 		cl := t.client
 		tt := t
-		group.Go(func() error {
 
+		targetSnapshot, err := s.db.CreateTargetSnapshot(runID, tt.cfg.Alias, tt.cfg.UploadPrefix, s.cfg.Global.Snapshots.DryRun)
+		if err != nil {
+			log.WithError(err).Error("failed to create target snapshot record")
+			continue
+		}
+
+		if s.cfg.Global.Snapshots.DryRun {
+			log.WithFields(log.Fields{
+				"alias":         tt.cfg.Alias,
+				"upload_prefix": tt.cfg.UploadPrefix,
+			}).Warn("dry run mode enabled - skipping snapshot upload and waiting 60s to mark as success")
+			go func() {
+				time.Sleep(60 * time.Second)
+				if err := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", ""); err != nil {
+					log.WithError(err).Error("failed to update target snapshot status")
+				}
+			}()
+			continue
+		}
+
+		group.Go(func() error {
 			err := cl.RCloneSyncLocalToRemote(tt.cfg.DataDir, tt.cfg.UploadPrefix)
 			if err != nil {
-				log.WithError(err).Errorf("could not upload via rclone  %s", cl.TargetConfig.Alias)
+				if errDB := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "failed", err.Error()); errDB != nil {
+					log.WithError(errDB).Error("failed to update target snapshot status")
+				}
+				log.WithError(err).Errorf("could not upload via rclone %s", cl.TargetConfig.Alias)
 				return err
+			}
+
+			if err := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", ""); err != nil {
+				log.WithError(err).Error("failed to update target snapshot status")
 			}
 			log.WithFields(log.Fields{
 				"alias":       tt.cfg.Alias,
@@ -500,11 +634,17 @@ func (s *SnapShotter) UploadSnapshot() error {
 			return nil
 		})
 	}
+
 	if err := group.Wait(); err != nil {
 		return err
 	}
+
 	log.WithFields(log.Fields{
 		"took": time.Since(t1),
 	}).Info("finished uploading all data snapshots")
 	return nil
+}
+
+func (s *SnapShotter) GetDB() *db.DB {
+	return s.db
 }

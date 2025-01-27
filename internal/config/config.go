@@ -22,10 +22,17 @@ type Config struct {
 		Snapshots struct {
 			CheckIntervalSeconds int          `yaml:"check_interval_seconds"`
 			BlockInterval        int          `yaml:"block_interval"`
+			DryRun               bool         `yaml:"dry_run"`
 			RunOnce              bool         `yaml:"run_once"`
 			RClone               RCloneConfig `yaml:"rclone"`
 		} `yaml:"snapshots"`
+		Database struct {
+			Path string `yaml:"path"`
+		} `yaml:"database"`
 	} `yaml:"global"`
+	Server struct {
+		ListenAddr string `yaml:"listen_addr"`
+	} `yaml:"server"`
 	Targets struct {
 		SSH []SSHTargetConfig `yaml:"ssh"`
 	} `yaml:"targets"`
@@ -41,6 +48,7 @@ type SSHTargetConfig struct {
 	DockerContainers struct {
 		EngineSnooper string `yaml:"engine_snooper"`
 		Execution     string `yaml:"execution"`
+		Beacon        string `yaml:"beacon"`
 	} `yaml:"docker_containers"`
 	Endpoints struct {
 		Beacon    string `yaml:"beacon"`
