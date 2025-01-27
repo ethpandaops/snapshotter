@@ -103,7 +103,7 @@ func (s *SnapShotter) initValidations() {
 				log.WithError(err).Fatalf("could not get chain Id from %s", cl.TargetConfig.Alias)
 			}
 			if chain != s.cfg.Global.ChainID {
-				log.Fatalf("chain id missmatch for host %s . got %s expected %s", cl.TargetConfig.Alias, chain, s.cfg.Global.ChainID)
+				log.Fatalf("chain id mismatch for host %s . got %s expected %s", cl.TargetConfig.Alias, chain, s.cfg.Global.ChainID)
 			}
 			log.WithFields(log.Fields{
 				"node":    cl.TargetConfig.Alias,

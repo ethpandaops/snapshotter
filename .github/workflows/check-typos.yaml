@@ -1,0 +1,19 @@
+name: Check - Typos
+
+permissions:
+  contents: read
+
+on: [pull_request]
+
+env:
+  CLICOLOR: 1
+
+jobs:
+  spelling:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Actions Repository
+      uses: actions/checkout@v4
+    - name: Spell Check Repo
+      uses: crate-ci/typos@685eb3d55be2f85191e8c84acb9f44d7756f84ab #v1.29.4
