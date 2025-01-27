@@ -12,29 +12,21 @@ import (
 	sshClient "github.com/ethpandaops/eth-snapshotter/internal/clients/ssh"
 	"github.com/ethpandaops/eth-snapshotter/internal/config"
 	"github.com/ethpandaops/eth-snapshotter/internal/db"
-	"github.com/ethpandaops/eth-snapshotter/internal/server"
+	"github.com/ethpandaops/eth-snapshotter/internal/types"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
 type SnapShotter struct {
 	cfg        *config.Config
-	status     *Status
+	status     *types.SnapshotterStatus
 	sshTargets []*sshTarget
 	db         *db.DB
-	server     *server.Server
 }
 
 type sshTarget struct {
 	client *sshClient.SSHClient
 	cfg    *config.SSHTargetConfig
-}
-
-type Status struct {
-	ProcessedBlockHeight          uint64
-	NextPeriodSnapshotBlockHeight uint64
-	SnapshotInProgress            bool
-	sync.Mutex
 }
 
 func Init(cfg *config.Config) (*SnapShotter, error) {
@@ -61,18 +53,12 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 	}
 
 	ss := SnapShotter{
-		cfg:    cfg,
-		status: &Status{},
-		db:     db,
+		cfg: cfg,
+		status: &types.SnapshotterStatus{
+			BlockInterval: uint64(cfg.Global.Snapshots.BlockInterval),
+		},
+		db: db,
 	}
-
-	// Initialize HTTP server
-	ss.server = server.New(cfg, db)
-	go func() {
-		if err := ss.server.Start(); err != nil {
-			log.WithError(err).Fatal("failed to start HTTP server")
-		}
-	}()
 
 	sshTargets := make([]*sshTarget, len(cfg.Targets.SSH))
 
@@ -99,6 +85,10 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 	ss.sshTargets = sshTargets
 
 	return &ss, nil
+}
+
+func (s *SnapShotter) GetStatus() *types.SnapshotterStatus {
+	return s.status
 }
 
 func (s *SnapShotter) initValidations() {
@@ -274,6 +264,15 @@ func checkIfAllSameResults(ch chan uint64) (bool, uint64) {
 	return isFirstValueSet, firstValue
 }
 
+// Add function that receives a block number and returns how many blocks are left to the next snapshot
+func (s *SnapShotter) BlocksLeftToNextSnapshot(blockNumber uint64) uint64 {
+	b := uint64(s.cfg.Global.Snapshots.BlockInterval) - (blockNumber % uint64(s.cfg.Global.Snapshots.BlockInterval))
+	if b == uint64(s.cfg.Global.Snapshots.BlockInterval) {
+		return 0
+	}
+	return b
+}
+
 func (s *SnapShotter) StartPeriodicPolling() {
 	ticker := time.NewTicker(time.Duration(s.cfg.Global.Snapshots.CheckIntervalSeconds) * time.Second)
 	quit := make(chan struct{})
@@ -284,16 +283,38 @@ func (s *SnapShotter) StartPeriodicPolling() {
 			t1 := time.Now()
 			allSynced, blockNumber := s.VerifyTargetsAreSynced()
 			if allSynced {
+				blocksLeft := s.BlocksLeftToNextSnapshot(blockNumber)
 				log.WithFields(log.Fields{
-					"block": blockNumber,
-					"took":  time.Since(t1),
+					"block_current":  blockNumber,
+					"block_next":     blockNumber + blocksLeft,
+					"blocks_left":    blocksLeft,
+					"block_interval": s.cfg.Global.Snapshots.BlockInterval,
+					"eta":            time.Duration(blocksLeft) * 12 * time.Second,
+					"took":           time.Since(t1),
 				}).Info("all targets are synced")
 				s.status.Lock()
 				s.status.ProcessedBlockHeight = blockNumber
-				s.status.NextPeriodSnapshotBlockHeight = blockNumber * (blockNumber / uint64(s.cfg.Global.Snapshots.BlockInterval))
+				s.status.NextSnapshotBlockHeight = blockNumber + blocksLeft
 				s.status.Unlock()
 
-				if blockNumber%uint64(s.cfg.Global.Snapshots.BlockInterval) == 0 {
+				run, err := s.db.GetMostRecentRun()
+				if err != nil {
+					log.WithError(err).Error("failed to get most recent run")
+				}
+
+				// If the most recent run is far away from the current block number, we need to create a new snapshot
+				lastRunIsTooOld := false
+				if blockNumber > run.BlockHeight+uint64(s.cfg.Global.Snapshots.BlockInterval) {
+					lastRunIsTooOld = true
+					log.WithFields(log.Fields{
+						"run_id":            run.ID,
+						"block_current":     blockNumber,
+						"block_last_run":    run.BlockHeight,
+						"should_have_block": run.BlockHeight + uint64(s.cfg.Global.Snapshots.BlockInterval),
+					}).Warn("most recent run is too old")
+				}
+
+				if blocksLeft == 0 || lastRunIsTooOld {
 					log.WithFields(log.Fields{
 						"block":          blockNumber,
 						"block_interval": s.cfg.Global.Snapshots.BlockInterval,
@@ -609,4 +630,8 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 		"took": time.Since(t1),
 	}).Info("finished uploading all data snapshots")
 	return nil
+}
+
+func (s *SnapShotter) GetDB() *db.DB {
+	return s.db
 }

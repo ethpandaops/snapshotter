@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/ethpandaops/eth-snapshotter/internal/config"
+	"github.com/ethpandaops/eth-snapshotter/internal/server"
 	"github.com/ethpandaops/eth-snapshotter/internal/snapshotter"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -23,8 +24,15 @@ var rootCmd = &cobra.Command{
 			log.WithError(err).Fatal("failed to start")
 		}
 
-		ss.StartPeriodicPolling()
+		// Initialize HTTP server
+		srv := server.New(cfg, ss.GetDB(), ss.GetStatus)
+		go func() {
+			if err := srv.Start(); err != nil {
+				log.WithError(err).Fatal("failed to start HTTP server")
+			}
+		}()
 
+		ss.StartPeriodicPolling()
 	},
 }
 

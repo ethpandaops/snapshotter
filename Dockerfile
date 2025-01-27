@@ -12,5 +12,4 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y --no-install-reco
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /bin/app /snapshotter
-EXPOSE 5555
 ENTRYPOINT ["/snapshotter"]

@@ -12,26 +12,26 @@ type DB struct {
 }
 
 type SnapshotRun struct {
-	ID              int64
-	BlockHeight     uint64
-	StartTime       time.Time
-	EndTime         time.Time
-	Status          string // "success" or "failed"
-	ErrorMessage    string
-	DryRun          bool
+	ID              int64     `json:"id"`
+	BlockHeight     uint64    `json:"blockHeight"`
+	StartTime       time.Time `json:"startTime"`
+	EndTime         time.Time `json:"endTime"`
+	Status          string    `json:"status"` // "success" or "failed"
+	ErrorMessage    string    `json:"errorMessage"`
+	DryRun          bool      `json:"dryRun"`
 	TargetsSnapshot []TargetSnapshot
 }
 
 type TargetSnapshot struct {
-	ID            int64
-	SnapshotRunID int64
-	Alias         string
-	UploadPrefix  string
-	StartTime     time.Time
-	EndTime       time.Time
-	Status        string // "success" or "failed"
-	ErrorMessage  string
-	DryRun        bool
+	ID            int64     `json:"id"`
+	SnapshotRunID int64     `json:"snapshotRunId"`
+	Alias         string    `json:"alias"`
+	UploadPrefix  string    `json:"uploadPrefix"`
+	StartTime     time.Time `json:"startTime"`
+	EndTime       time.Time `json:"endTime"`
+	Status        string    `json:"status"` // "success" or "failed"
+	ErrorMessage  string    `json:"errorMessage"`
+	DryRun        bool      `json:"isDryRun"`
 }
 
 func NewDB(dbPath string) (*DB, error) {

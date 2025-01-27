@@ -7,19 +7,22 @@ import (
 
 	"github.com/ethpandaops/eth-snapshotter/internal/config"
 	"github.com/ethpandaops/eth-snapshotter/internal/db"
+	"github.com/ethpandaops/eth-snapshotter/internal/types"
 	"github.com/gorilla/mux"
 	log "github.com/sirupsen/logrus"
 )
 
 type Server struct {
-	cfg *config.Config
-	db  *db.DB
+	cfg       *config.Config
+	db        *db.DB
+	getStatus func() *types.SnapshotterStatus
 }
 
-func New(cfg *config.Config, database *db.DB) *Server {
+func New(cfg *config.Config, database *db.DB, getStatusFn func() *types.SnapshotterStatus) *Server {
 	return &Server{
-		cfg: cfg,
-		db:  database,
+		cfg:       cfg,
+		db:        database,
+		getStatus: getStatusFn,
 	}
 }
 
@@ -79,9 +82,11 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// create anonymous struct to hide the run object
 	resp := struct {
-		LatestRun *db.SnapshotRun `json:"latestRun"`
+		LatestRun *db.SnapshotRun          `json:"latestRun"`
+		Status    *types.SnapshotterStatus `json:"status"`
 	}{
 		LatestRun: run,
+		Status:    s.getStatus(),
 	}
 	json.NewEncoder(w).Encode(resp)
 }
