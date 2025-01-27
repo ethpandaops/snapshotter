@@ -369,19 +369,24 @@ func (s *SnapShotter) CreateSnapshot() error {
 	}).Info("starting snapshot")
 
 	if err := s.PrepareForSnapshot(); err != nil {
-		s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error())
-		log.WithError(err).Error("failed to prepare for snapshot")
+		if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error()); errDB != nil {
+			log.WithError(errDB).Error("failed to update snapshot run status")
+		}
 		return err
 	}
 
 	if err := s.UploadSnapshot(run.ID); err != nil {
-		s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error())
+		if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error()); errDB != nil {
+			log.WithError(errDB).Error("failed to update snapshot run status")
+		}
 		log.WithError(err).Error("failed to upload snapshot data")
 		return err
 	}
 
 	if err := s.PostSnapshotStart(); err != nil {
-		s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error())
+		if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error()); errDB != nil {
+			log.WithError(errDB).Error("failed to update snapshot run status")
+		}
 		log.WithError(err).Error("failed to restore service after snapshot")
 		return err
 	}
@@ -392,8 +397,10 @@ func (s *SnapShotter) CreateSnapshot() error {
 		}).Warn("dry run mode enabled - waiting 60s to update run status")
 		time.Sleep(60 * time.Second)
 	}
-	s.db.UpdateSnapshotRunStatus(run.ID, "success", "")
-	return nil
+	if err := s.db.UpdateSnapshotRunStatus(run.ID, "success", ""); err != nil {
+		log.WithError(err).Error("failed to update snapshot run status")
+	}
+	return err
 }
 
 func (s *SnapShotter) PrepareForSnapshot() error {
@@ -598,7 +605,9 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 			}).Warn("dry run mode enabled - skipping snapshot upload and waiting 60s to mark as success")
 			go func() {
 				time.Sleep(60 * time.Second)
-				s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", "")
+				if err := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", ""); err != nil {
+					log.WithError(err).Error("failed to update target snapshot status")
+				}
 			}()
 			continue
 		}
@@ -606,12 +615,16 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 		group.Go(func() error {
 			err := cl.RCloneSyncLocalToRemote(tt.cfg.DataDir, tt.cfg.UploadPrefix)
 			if err != nil {
-				s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "failed", err.Error())
+				if errDB := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "failed", err.Error()); errDB != nil {
+					log.WithError(errDB).Error("failed to update target snapshot status")
+				}
 				log.WithError(err).Errorf("could not upload via rclone %s", cl.TargetConfig.Alias)
 				return err
 			}
 
-			s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", "")
+			if err := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "success", ""); err != nil {
+				log.WithError(err).Error("failed to update target snapshot status")
+			}
 			log.WithFields(log.Fields{
 				"alias":       tt.cfg.Alias,
 				"uploaded_to": tt.cfg.UploadPrefix,

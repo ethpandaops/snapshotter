@@ -66,11 +66,15 @@ func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"page":  page,
 		"limit": limit,
 		"runs":  runs,
-	})
+	}); err != nil {
+		log.WithError(err).Error("failed to encode runs")
+		http.Error(w, "failed to encode runs", http.StatusInternalServerError)
+		return
+	}
 }
 
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
@@ -88,5 +92,9 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		LatestRun: run,
 		Status:    s.getStatus(),
 	}
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.WithError(err).Error("failed to encode status")
+		http.Error(w, "failed to encode status", http.StatusInternalServerError)
+		return
+	}
 }
