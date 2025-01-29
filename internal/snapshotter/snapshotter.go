@@ -304,7 +304,7 @@ func (s *SnapShotter) StartPeriodicPolling() {
 
 				// If the most recent run is far away from the current block number, we need to create a new snapshot
 				lastRunIsTooOld := false
-				if blockNumber > run.BlockHeight+uint64(s.cfg.Global.Snapshots.BlockInterval) {
+				if run != nil && blockNumber > run.BlockHeight+uint64(s.cfg.Global.Snapshots.BlockInterval) {
 					lastRunIsTooOld = true
 					log.WithFields(log.Fields{
 						"run_id":            run.ID,
