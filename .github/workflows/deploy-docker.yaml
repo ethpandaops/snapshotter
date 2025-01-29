@@ -27,3 +27,4 @@ jobs:
           registry_password: ${{ secrets.GITHUB_TOKEN }}
           image_name: ${{ github.repository }}
           push: true
+          platforms: linux/amd64
