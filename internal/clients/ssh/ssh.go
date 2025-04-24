@@ -46,7 +46,11 @@ func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer conn.Close()
+		defer func() {
+			if err := conn.Close(); err != nil {
+				log.WithError(err).Warn("failed to close SSH agent connection")
+			}
+		}()
 		ag := agent.NewClient(conn)
 		auths = append(auths, ssh.PublicKeysCallback(ag.Signers))
 	} else {
@@ -92,13 +96,21 @@ func (client *SSHClient) RunCommand(cmd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer connection.Close()
+	defer func() {
+		if err := connection.Close(); err != nil {
+			log.WithError(err).Warn("failed to close SSH connection")
+		}
+	}()
 
 	session, err := connection.NewSession()
 	if err != nil {
 		return "", err
 	}
-	defer session.Close()
+	defer func() {
+		if err := session.Close(); err != nil {
+			log.WithError(err).Warn("failed to close SSH session")
+		}
+	}()
 
 	output, err := session.CombinedOutput(cmd)
 	if err != nil {

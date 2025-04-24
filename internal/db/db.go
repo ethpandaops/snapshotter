@@ -146,7 +146,7 @@ func (d *DB) UpdateTargetSnapshotStatus(id int64, status string, errorMsg string
 	return err
 }
 
-func (d *DB) GetTargetSnapshotsForRun(runID int64) ([]TargetSnapshot, error) {
+func (d *DB) GetTargetSnapshotsForRun(runID int64) (targets []TargetSnapshot, err error) {
 	rows, err := d.db.Query(`
 		SELECT id, snapshot_run_id, alias, upload_prefix, start_time, end_time, status, error_message, dry_run
 		FROM target_snapshots
@@ -156,9 +156,15 @@ func (d *DB) GetTargetSnapshotsForRun(runID int64) ([]TargetSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			if err == nil {
+				err = cerr
+			}
+		}
+	}()
 
-	var targets []TargetSnapshot
+	targets = []TargetSnapshot{}
 	for rows.Next() {
 		var target TargetSnapshot
 		var endTime sql.NullTime
@@ -188,7 +194,7 @@ func (d *DB) GetTargetSnapshotsForRun(runID int64) ([]TargetSnapshot, error) {
 	return targets, nil
 }
 
-func (d *DB) GetAllRuns() ([]SnapshotRun, error) {
+func (d *DB) GetAllRuns() (runs []SnapshotRun, err error) {
 	rows, err := d.db.Query(`
 		SELECT id, block_height, start_time, end_time, status, error_message, dry_run
 		FROM snapshot_runs
@@ -197,9 +203,15 @@ func (d *DB) GetAllRuns() ([]SnapshotRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			if err == nil {
+				err = cerr
+			}
+		}
+	}()
 
-	var runs []SnapshotRun
+	runs = []SnapshotRun{}
 	for rows.Next() {
 		var run SnapshotRun
 		var endTime sql.NullTime
@@ -277,7 +289,7 @@ func (d *DB) GetMostRecentRun() (*SnapshotRun, error) {
 	return &run, nil
 }
 
-func (d *DB) GetPaginatedRuns(offset, limit int) ([]SnapshotRun, error) {
+func (d *DB) GetPaginatedRuns(offset, limit int) (runs []SnapshotRun, err error) {
 	if limit > 20 {
 		limit = 20
 	}
@@ -291,9 +303,15 @@ func (d *DB) GetPaginatedRuns(offset, limit int) ([]SnapshotRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			if err == nil {
+				err = cerr
+			}
+		}
+	}()
 
-	var runs []SnapshotRun
+	runs = []SnapshotRun{}
 	for rows.Next() {
 		var run SnapshotRun
 		var endTime sql.NullTime
