@@ -108,7 +108,12 @@ func (client *SSHClient) RunCommand(cmd string) (string, error) {
 	}
 	defer func() {
 		if err := session.Close(); err != nil {
-			log.WithError(err).Warn("failed to close SSH session")
+			// Check if error is EOF, which is expected when the server already closed the connection
+			if err.Error() == "EOF" {
+				log.WithField("host", client.TargetConfig.Host).Debug("SSH session already closed by server (EOF)")
+			} else {
+				log.WithError(err).Warn("failed to close SSH session")
+			}
 		}
 	}()
 
