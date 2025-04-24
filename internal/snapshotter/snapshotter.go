@@ -592,7 +592,10 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 		cl := t.client
 		tt := t
 
-		targetSnapshot, err := s.db.CreateTargetSnapshot(runID, tt.cfg.Alias, tt.cfg.UploadPrefix, s.cfg.Global.Snapshots.DryRun)
+		// Append the block number to the upload prefix
+		uploadPrefix := fmt.Sprintf("%s/%d", tt.cfg.UploadPrefix, s.status.ProcessedBlockHeight)
+
+		targetSnapshot, err := s.db.CreateTargetSnapshot(runID, tt.cfg.Alias, uploadPrefix, s.cfg.Global.Snapshots.DryRun)
 		if err != nil {
 			log.WithError(err).Error("failed to create target snapshot record")
 			continue
@@ -601,7 +604,7 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 		if s.cfg.Global.Snapshots.DryRun {
 			log.WithFields(log.Fields{
 				"alias":         tt.cfg.Alias,
-				"upload_prefix": tt.cfg.UploadPrefix,
+				"upload_prefix": uploadPrefix,
 			}).Warn("dry run mode enabled - skipping snapshot upload and waiting 60s to mark as success")
 			go func() {
 				time.Sleep(60 * time.Second)
@@ -613,7 +616,7 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 		}
 
 		group.Go(func() error {
-			err := cl.RCloneSyncLocalToRemote(tt.cfg.DataDir, tt.cfg.UploadPrefix)
+			err := cl.RCloneSyncLocalToRemote(tt.cfg.DataDir, uploadPrefix)
 			if err != nil {
 				if errDB := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "failed", err.Error()); errDB != nil {
 					log.WithError(errDB).Error("failed to update target snapshot status")
@@ -627,7 +630,7 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 			}
 			log.WithFields(log.Fields{
 				"alias":       tt.cfg.Alias,
-				"uploaded_to": tt.cfg.UploadPrefix,
+				"uploaded_to": uploadPrefix,
 				"height":      s.status.ProcessedBlockHeight,
 				"took":        time.Since(t1),
 			}).Info("uploaded data snapshot")

@@ -28,12 +28,12 @@ func New(cfg *config.Config, database *db.DB, getStatusFn func() *types.Snapshot
 
 func (s *Server) Start() error {
 	r := mux.NewRouter()
-	r.HandleFunc("/api/runs", s.handleGetRuns).Methods("GET")
-	r.HandleFunc("/api/status", s.handleGetStatus).Methods("GET")
+	r.HandleFunc("/api/v1/runs", s.handleGetRuns).Methods("GET")
+	r.HandleFunc("/api/v1/status", s.handleGetStatus).Methods("GET")
 
 	listenAddr := s.cfg.Server.ListenAddr
 	if listenAddr == "" {
-		listenAddr = "0.0.0.0:5000"
+		listenAddr = "0.0.0.0:5001"
 	}
 
 	log.WithField("addr", listenAddr).Info("starting HTTP server")
