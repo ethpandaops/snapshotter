@@ -63,6 +63,31 @@ type RCloneConfig struct {
 	CommandTemplate string            `yaml:"cmd_template"`
 }
 
+// DefaultRCloneCommandTemplate is the default template used for RClone commands if not specified in config
+const DefaultRCloneCommandTemplate = `-ac "
+apk add --no-cache tar zstd &&
+cd {{ .DataDir }} &&
+tar -I zstd -cvf - .
+--exclude=./nodekey
+--exclude=./key
+--exclude=./discovery-secret
+| rclone rcat --s3-chunk-size 150M mys3:/{{ .UploadPathPrefix }}/snapshot.tar.zst &&
+rclone copy {{ .DataDir }}/_snapshot_eth_getBlockByNumber.json mys3:/{{ .UploadPathPrefix }} &&
+rclone copy {{ .DataDir }}/_snapshot_web3_clientVersion.json mys3:/{{ .UploadPathPrefix }} &&
+BLOCK_NUMBER=$(basename {{ .UploadPathPrefix }}) &&
+echo $BLOCK_NUMBER | rclone rcat mys3:/$(dirname {{ .UploadPathPrefix }})/latest
+"`
+
+// GetDefaultRCloneConfig returns an RCloneConfig with sensible defaults
+func GetDefaultRCloneConfig() RCloneConfig {
+	return RCloneConfig{
+		Env:             make(map[string]string),
+		Version:         "1.65.2",
+		Entrypoint:      "/bin/sh",
+		CommandTemplate: DefaultRCloneCommandTemplate,
+	}
+}
+
 func ReadFromFile(path string) (*Config, error) {
 	log.WithField("cfgFile", path).Info("loading config")
 	if path == "" {
@@ -79,9 +104,22 @@ func ReadFromFile(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Set default values if not specified in config
+	if config.Global.Snapshots.RClone.CommandTemplate == "" {
+		log.Info("using default RClone command template")
+		config.Global.Snapshots.RClone.CommandTemplate = DefaultRCloneCommandTemplate
+	}
+
+	if config.Global.Snapshots.RClone.Version == "" {
+		config.Global.Snapshots.RClone.Version = "1.65.2"
+	}
+
+	if config.Global.Snapshots.RClone.Entrypoint == "" {
+		config.Global.Snapshots.RClone.Entrypoint = "/bin/sh"
+	}
+
 	log.WithField("count", len(config.Targets.SSH)).Info("ssh targets")
 	for _, t := range config.Targets.SSH {
-
 		log.WithFields(log.Fields{
 			"alias":  t.Alias,
 			"target": fmt.Sprintf("%s@%s:%d", t.User, t.Host, t.Port),
@@ -93,5 +131,4 @@ func ReadFromFile(path string) (*Config, error) {
 	}
 
 	return config, nil
-
 }

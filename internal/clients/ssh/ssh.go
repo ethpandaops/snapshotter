@@ -294,14 +294,31 @@ func (client *SSHClient) RestartBeacon() error {
 func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPathPrefix string) error {
 	cmd := "docker run --rm" +
 		" -v " + srcDir + ":" + srcDir
-	if client.RCloneConfig.Entrypoint != "" {
-		cmd += " --entrypoint " + client.RCloneConfig.Entrypoint
+
+	// Use default entrypoint if not specified
+	entrypoint := client.RCloneConfig.Entrypoint
+	if entrypoint == "" {
+		entrypoint = config.GetDefaultRCloneConfig().Entrypoint
 	}
-	for k, v := range client.RCloneConfig.Env {
-		cmd += fmt.Sprintf(" -e %s=%s", k, v)
+	cmd += " --entrypoint " + entrypoint
+
+	// Add environment variables
+	if client.RCloneConfig.Env != nil {
+		for k, v := range client.RCloneConfig.Env {
+			cmd += fmt.Sprintf(" -e %s=%s", k, v)
+		}
 	}
 
-	tmpl, err := template.New("cmd").Parse(client.RCloneConfig.CommandTemplate)
+	// Get command template, using default if not specified
+	cmdTemplate := client.RCloneConfig.CommandTemplate
+	if cmdTemplate == "" {
+		// If we don't have the template directly, use the default from config package
+		// This fallback should rarely happen since we set defaults in config.ReadFromFile
+		log.Debug("RClone command template not specified, using default from config package")
+		cmdTemplate = config.GetDefaultRCloneConfig().CommandTemplate
+	}
+
+	tmpl, err := template.New("cmd").Parse(cmdTemplate)
 	if err != nil {
 		log.WithError(err).Error("failed to parse rclone cmd template")
 		return err
@@ -321,7 +338,13 @@ func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPathPrefix string
 		return err
 	}
 
-	cmd += " rclone/rclone:" + client.RCloneConfig.Version + " " + rcloneCmd.String()
+	// Use default version if not specified
+	version := client.RCloneConfig.Version
+	if version == "" {
+		version = config.GetDefaultRCloneConfig().Version
+	}
+
+	cmd += " rclone/rclone:" + version + " " + rcloneCmd.String()
 	out, err := client.RunCommand(cmd)
 	if err != nil {
 		log.WithError(err).WithField("output", out).Error("failed to rclone sync")
