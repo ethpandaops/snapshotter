@@ -20,7 +20,7 @@ func TestAuthMiddleware(t *testing.T) {
 			name:           "no token configured",
 			configToken:    "",
 			requestToken:   "",
-			expectedStatus: http.StatusOK,
+			expectedStatus: http.StatusUnauthorized,
 		},
 		{
 			name:           "valid token",
