@@ -25,6 +25,12 @@ type SSHClient struct {
 	RCloneConfig *config.RCloneConfig
 }
 
+// SnapshotMetadata represents metadata about a snapshot
+type SnapshotMetadata struct {
+	DockerImage string            `json:"docker_image,omitempty"`
+	Static      map[string]string `json:"static,omitempty"`
+}
+
 func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string, ignoreHostKeyCheck bool, useAgent bool, rclone *config.RCloneConfig, target *config.SSHTargetConfig) *SSHClient {
 
 	var hostkeyCallback ssh.HostKeyCallback
@@ -291,7 +297,51 @@ func (client *SSHClient) RestartBeacon() error {
 	return client.StartDockerContainer(client.TargetConfig.DockerContainers.Beacon)
 }
 
+func (client *SSHClient) GetDockerContainerImage(containerName string) (string, error) {
+	cmd := fmt.Sprintf(`docker inspect --format='{{.Config.Image}}' "%s"`, containerName)
+	out, err := client.RunCommand(cmd)
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"container": containerName,
+			"output":    out,
+		}).Warn("failed to get container image")
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPrefix string, blockNumber uint64) error {
+	// Get Docker image information for metadata
+	metadata := SnapshotMetadata{
+		Static: client.TargetConfig.Metadata,
+	}
+
+	// Get the execution container image if available
+	if client.TargetConfig.DockerContainers.Execution != "" {
+		dockerImage, err := client.GetDockerContainerImage(client.TargetConfig.DockerContainers.Execution)
+		if err == nil {
+			metadata.DockerImage = dockerImage
+		} else {
+			log.WithError(err).Warn("failed to get execution container image for metadata")
+		}
+	}
+
+	// Create metadata JSON file
+	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		log.WithError(err).Error("failed to marshal snapshot metadata")
+		return err
+	}
+
+	// Write metadata to file
+	metadataFile := fmt.Sprintf("%s/_snapshot_metadata.json", srcDir)
+	metadataCmd := fmt.Sprintf(`echo '%s' | sudo tee %s`, string(metadataJSON), metadataFile)
+	_, err = client.RunCommand(metadataCmd)
+	if err != nil {
+		log.WithError(err).Error("failed to write snapshot metadata file")
+		return err
+	}
+
 	cmd := "docker run --rm" +
 		" -v " + srcDir + ":" + srcDir
 

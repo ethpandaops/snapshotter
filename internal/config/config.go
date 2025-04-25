@@ -56,12 +56,13 @@ type S3Config struct {
 }
 
 type SSHTargetConfig struct {
-	Alias            string `yaml:"alias"`
-	Host             string `yaml:"host"`
-	User             string `yaml:"user"`
-	Port             int    `yaml:"port"`
-	DataDir          string `yaml:"data_dir"`
-	UploadPrefix     string `yaml:"upload_prefix"`
+	Alias            string            `yaml:"alias"`
+	Host             string            `yaml:"host"`
+	User             string            `yaml:"user"`
+	Port             int               `yaml:"port"`
+	DataDir          string            `yaml:"data_dir"`
+	UploadPrefix     string            `yaml:"upload_prefix"`
+	Metadata         map[string]string `yaml:"metadata"`
 	DockerContainers struct {
 		EngineSnooper string `yaml:"engine_snooper"`
 		Execution     string `yaml:"execution"`
@@ -86,8 +87,9 @@ type RCloneConfig struct {
 // .UploadPathPrefix is the prefix of the upload path ( e.g mainnet/geth)
 // .BlockNumber is the block number of the snapshot (e.g 123456)
 const DefaultRCloneCommandTemplate = `-ac "
-apk add --no-cache tar zstd &&
+apk add --no-cache tar zstd jq &&
 cd {{ .DataDir }} &&
+cat {{ .DataDir }}/_snapshot_metadata.json | jq . &&
 tar -I zstd
 --exclude=./nodekey
 --exclude=./key
@@ -96,6 +98,7 @@ tar -I zstd
 | rclone rcat --s3-chunk-size 150M mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }}/snapshot.tar.zst &&
 rclone copy {{ .DataDir }}/_snapshot_eth_getBlockByNumber.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
 rclone copy {{ .DataDir }}/_snapshot_web3_clientVersion.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
+rclone copy {{ .DataDir }}/_snapshot_metadata.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
 echo {{ .BlockNumber }} | rclone rcat mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/latest
 "`
 

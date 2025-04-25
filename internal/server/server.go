@@ -28,10 +28,12 @@ func New(cfg *config.Config, database *db.DB, getStatusFn func() *types.Snapshot
 
 func (s *Server) Start() error {
 	r := mux.NewRouter()
-	r.HandleFunc("/api/v1/runs", s.handleGetRuns).Methods("GET")
-	r.HandleFunc("/api/v1/status", s.handleGetStatus).Methods("GET")
-	r.HandleFunc("/api/v1/runs/{id}", s.handleGetRun).Methods("GET")
-	r.HandleFunc("/api/v1/targets/{id}", s.handleGetTargetSnapshot).Methods("GET")
+	publicRouter := r.PathPrefix("/api/v1").Subrouter()
+	publicRouter.HandleFunc("/runs", s.handleGetRuns).Methods("GET")
+	publicRouter.HandleFunc("/status", s.handleGetStatus).Methods("GET")
+	publicRouter.HandleFunc("/runs/{id}", s.handleGetRun).Methods("GET")
+	publicRouter.HandleFunc("/targets/{id}", s.handleGetTargetSnapshot).Methods("GET")
+	publicRouter.HandleFunc("/targets", s.handleGetTargets).Methods("GET")
 
 	// Create a subrouter for authenticated endpoints
 	authRouter := r.PathPrefix("/api/v1").Subrouter()
@@ -99,8 +101,19 @@ func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
 		limit = 20
 	}
 
+	// Get filter parameters
+	includeDeleted := false
+	if filterStr := r.URL.Query().Get("include_deleted"); filterStr != "" {
+		includeDeleted = filterStr == "true"
+	}
+
+	onlyPersisted := false
+	if filterStr := r.URL.Query().Get("only_persisted"); filterStr != "" {
+		onlyPersisted = filterStr == "true"
+	}
+
 	offset := (page - 1) * limit
-	runs, err := s.db.GetPaginatedRuns(offset, limit)
+	runs, err := s.db.GetPaginatedRuns(offset, limit, includeDeleted, onlyPersisted)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -166,11 +179,16 @@ func (s *Server) handleSetPersisted(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set the persisted flag
+	// Set the persisted flag (this also persists all associated targets)
 	if err := s.db.SetSnapshotRunPersisted(id, true); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	log.WithFields(log.Fields{
+		"run_id":        id,
+		"targets_count": len(run.TargetsSnapshot),
+	}).Info("marked run and its targets as persisted")
 
 	// Get the updated run
 	run, err = s.db.GetSnapshotRunByID(id)
@@ -207,11 +225,16 @@ func (s *Server) handleSetUnpersisted(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set the persisted flag
+	// Set the persisted flag (this also unpersists all associated targets)
 	if err := s.db.SetSnapshotRunPersisted(id, false); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	log.WithFields(log.Fields{
+		"run_id":        id,
+		"targets_count": len(run.TargetsSnapshot),
+	}).Info("marked run and its targets as not persisted")
 
 	// Get the updated run
 	run, err = s.db.GetSnapshotRunByID(id)
@@ -356,6 +379,64 @@ func (s *Server) handleSetTargetUnpersisted(w http.ResponseWriter, r *http.Reque
 	if err := json.NewEncoder(w).Encode(target); err != nil {
 		log.WithError(err).Error("failed to encode target snapshot")
 		http.Error(w, "failed to encode target snapshot", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleGetTargets(w http.ResponseWriter, r *http.Request) {
+	// Check if alias is provided
+	alias := r.URL.Query().Get("alias")
+	if alias == "" {
+		http.Error(w, "alias parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Handle pagination
+	page := 1
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	limit := 20
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if limit > 20 {
+		limit = 20
+	}
+
+	// Get filter parameters
+	includeDeleted := false
+	if filterStr := r.URL.Query().Get("include_deleted"); filterStr != "" {
+		includeDeleted = filterStr == "true"
+	}
+
+	onlyPersisted := false
+	if filterStr := r.URL.Query().Get("only_persisted"); filterStr != "" {
+		onlyPersisted = filterStr == "true"
+	}
+
+	offset := (page - 1) * limit
+	targets, err := s.db.GetTargetSnapshotsByAlias(alias, limit, offset, includeDeleted, onlyPersisted)
+	if err != nil {
+		log.WithError(err).Error("failed to get targets by alias")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"page":    page,
+		"limit":   limit,
+		"alias":   alias,
+		"targets": targets,
+	}); err != nil {
+		log.WithError(err).Error("failed to encode targets")
+		http.Error(w, "failed to encode targets", http.StatusInternalServerError)
 		return
 	}
 }

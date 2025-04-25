@@ -152,7 +152,7 @@ Example using curl:
 
 ```bash
 # Mark a snapshot run as persisted
-curl -X POST "http://localhost:5001/api/v1/runs/123/persist" \
+curl -X POST "http://localhost:5001/api/v1/runs/44/persist" \
   -H "Authorization: Bearer your-secure-api-token-here"
 
 # Mark a snapshot run as not persisted
@@ -182,13 +182,77 @@ Other endpoints remain publicly accessible:
 - `GET /api/v1/runs` - List all snapshot runs
 - `GET /api/v1/runs/{id}` - Get details about a specific snapshot run
 - `GET /api/v1/targets/{id}` - Get details about a specific target snapshot
+- `GET /api/v1/targets?alias=client_name` - List all target snapshots for a specific client alias
 - `GET /api/v1/status` - Get snapshotter status
+
+#### Filtering API
+
+The `GET /api/v1/runs` endpoint supports the following query parameters for filtering:
+
+- `include_deleted=true` - Include deleted runs in the results (by default, deleted runs are excluded)
+- `only_persisted=true` - Show only persisted runs
+- `page=X` - Page number for pagination (default: 1)
+- `limit=Y` - Number of results per page, max 20 (default: 20)
+
+Example usage:
+
+```bash
+# List all non-deleted runs (default behavior)
+curl "http://localhost:5001/api/v1/runs"
+
+# Include deleted runs
+curl "http://localhost:5001/api/v1/runs?include_deleted=true"
+
+# Show only persisted runs
+curl "http://localhost:5001/api/v1/runs?only_persisted=true"
+
+# Show only persisted runs, including deleted ones
+curl "http://localhost:5001/api/v1/runs?include_deleted=true&only_persisted=true"
+
+# Pagination example
+curl "http://localhost:5001/api/v1/runs?page=2&limit=10"
+```
+
+#### Target Filtering API
+
+The `GET /api/v1/targets` endpoint allows you to fetch all target snapshots for a specific client alias:
+
+- `alias` - **(Required)** The client alias to filter targets (e.g., "geth", "nethermind", "besu")
+- `include_deleted=true` - Include deleted targets in the results (by default, deleted targets are excluded)
+- `only_persisted=true` - Show only persisted targets
+- `page=X` - Page number for pagination (default: 1)
+- `limit=Y` - Number of results per page, max 20 (default: 20)
+
+Example usage:
+
+```bash
+# List all targets for Geth client
+curl "http://localhost:5001/api/v1/targets?alias=geth"
+
+# Include deleted targets
+curl "http://localhost:5001/api/v1/targets?alias=geth&include_deleted=true"
+
+# Show only persisted targets
+curl "http://localhost:5001/api/v1/targets?alias=geth&only_persisted=true"
+
+# Show only persisted targets, including deleted ones
+curl "http://localhost:5001/api/v1/targets?alias=geth&include_deleted=true&only_persisted=true"
+
+# Paginate results
+curl "http://localhost:5001/api/v1/targets?alias=geth&page=2&limit=10"
+```
 
 ### Persistence Levels
 
 The snapshotter supports two levels of persistence:
 
-1. **Run-level persistence**: When you persist a snapshot run, all targets within that run are protected from cleanup.
-2. **Target-level persistence**: You can persist individual target snapshots, protecting only specific client/node data.
+1. **Run-level persistence**: When you persist a snapshot run, all targets within that run are automatically protected from cleanup. Persisting or unpersisting a run will cascade to all its associated targets.
+2. **Target-level persistence**: You can persist individual target snapshots independently, protecting only specific client/node data.
 
 This two-level approach gives you fine-grained control over which snapshots to retain.
+
+Persistence behavior:
+- When a run is persisted, all its targets are automatically persisted.
+- When a run is unpersisted, all its targets are automatically unpersisted.
+- Individual targets can still be persisted/unpersisted independently.
+- The cleanup routine respects both run-level and target-level persistence flags.

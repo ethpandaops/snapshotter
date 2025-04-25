@@ -13,16 +13,16 @@ type DB struct {
 }
 
 type SnapshotRun struct {
-	ID              int64     `json:"id"`
-	BlockHeight     uint64    `json:"blockHeight"`
-	StartTime       time.Time `json:"startTime"`
-	EndTime         time.Time `json:"endTime"`
-	Status          string    `json:"status"` // "success" or "failed"
-	ErrorMessage    string    `json:"errorMessage"`
-	DryRun          bool      `json:"dryRun"`
-	Deleted         bool      `json:"deleted"`
-	Persisted       bool      `json:"persisted"`
-	TargetsSnapshot []TargetSnapshot
+	ID              int64            `json:"id"`
+	BlockHeight     uint64           `json:"blockHeight"`
+	StartTime       time.Time        `json:"startTime"`
+	EndTime         time.Time        `json:"endTime"`
+	Status          string           `json:"status"` // "success" or "failed"
+	ErrorMessage    string           `json:"errorMessage"`
+	DryRun          bool             `json:"dryRun"`
+	Deleted         bool             `json:"deleted"`
+	Persisted       bool             `json:"persisted"`
+	TargetsSnapshot []TargetSnapshot `json:"targets"`
 }
 
 type TargetSnapshot struct {
@@ -318,17 +318,51 @@ func (d *DB) GetMostRecentRun() (*SnapshotRun, error) {
 	return &run, nil
 }
 
-func (d *DB) GetPaginatedRuns(offset, limit int) (runs []SnapshotRun, err error) {
+func (d *DB) GetPaginatedRuns(offset, limit int, includeDeleted bool, onlyPersisted bool) (runs []SnapshotRun, err error) {
 	if limit > 20 {
 		limit = 20
 	}
 
-	rows, err := d.db.Query(`
-		SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted, persisted
-		FROM snapshot_runs
-		ORDER BY start_time DESC
-		LIMIT ? OFFSET ?
-	`, limit, offset)
+	var query string
+	var args []interface{}
+
+	// Build query based on filter options
+	switch {
+	case !includeDeleted && onlyPersisted:
+		query = `
+			SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted, persisted
+			FROM snapshot_runs
+			WHERE deleted = 0 AND persisted = 1
+			ORDER BY start_time DESC
+			LIMIT ? OFFSET ?
+		`
+	case includeDeleted && onlyPersisted:
+		query = `
+			SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted, persisted
+			FROM snapshot_runs
+			WHERE persisted = 1
+			ORDER BY start_time DESC
+			LIMIT ? OFFSET ?
+		`
+	case includeDeleted && !onlyPersisted:
+		query = `
+			SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted, persisted
+			FROM snapshot_runs
+			ORDER BY start_time DESC
+			LIMIT ? OFFSET ?
+		`
+	default: // !includeDeleted && !onlyPersisted
+		query = `
+			SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted, persisted
+			FROM snapshot_runs
+			WHERE deleted = 0
+			ORDER BY start_time DESC
+			LIMIT ? OFFSET ?
+		`
+	}
+
+	args = []interface{}{limit, offset}
+	rows, err := d.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -459,6 +493,16 @@ func (d *DB) MarkSnapshotRunAsDeleted(id int64) error {
 func (d *DB) SetSnapshotRunPersisted(id int64, persisted bool) error {
 	_, err := d.db.Exec(
 		"UPDATE snapshot_runs SET persisted = ? WHERE id = ?",
+		persisted,
+		id,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Also update all associated target snapshots
+	_, err = d.db.Exec(
+		"UPDATE target_snapshots SET persisted = ? WHERE snapshot_run_id = ?",
 		persisted,
 		id,
 	)
@@ -631,4 +675,101 @@ func (d *DB) MarkTargetSnapshotAsDeleted(id int64) error {
 		id,
 	)
 	return err
+}
+
+// GetTargetSnapshotsByAlias gets all target snapshots matching the given alias
+func (d *DB) GetTargetSnapshotsByAlias(alias string, limit, offset int, includeDeleted bool, onlyPersisted bool) (targets []TargetSnapshot, err error) {
+	if limit > 20 {
+		limit = 20
+	}
+
+	var query string
+	var args []interface{}
+
+	// Build query based on filter options
+	switch {
+	case !includeDeleted && onlyPersisted:
+		query = `
+			SELECT id, snapshot_run_id, alias, upload_prefix, start_time, end_time, status, error_message, dry_run, deleted, persisted
+			FROM target_snapshots
+			WHERE alias = ? AND deleted = 0 AND persisted = 1
+			ORDER BY start_time DESC
+			LIMIT ? OFFSET ?
+		`
+		args = []interface{}{alias, limit, offset}
+	case includeDeleted && onlyPersisted:
+		query = `
+			SELECT id, snapshot_run_id, alias, upload_prefix, start_time, end_time, status, error_message, dry_run, deleted, persisted
+			FROM target_snapshots
+			WHERE alias = ? AND persisted = 1
+			ORDER BY start_time DESC
+			LIMIT ? OFFSET ?
+		`
+		args = []interface{}{alias, limit, offset}
+	case includeDeleted && !onlyPersisted:
+		query = `
+			SELECT id, snapshot_run_id, alias, upload_prefix, start_time, end_time, status, error_message, dry_run, deleted, persisted
+			FROM target_snapshots
+			WHERE alias = ?
+			ORDER BY start_time DESC
+			LIMIT ? OFFSET ?
+		`
+		args = []interface{}{alias, limit, offset}
+	default: // !includeDeleted && !onlyPersisted
+		query = `
+			SELECT id, snapshot_run_id, alias, upload_prefix, start_time, end_time, status, error_message, dry_run, deleted, persisted
+			FROM target_snapshots
+			WHERE alias = ? AND deleted = 0
+			ORDER BY start_time DESC
+			LIMIT ? OFFSET ?
+		`
+		args = []interface{}{alias, limit, offset}
+	}
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			if err == nil {
+				err = cerr
+			}
+		}
+	}()
+
+	targets = []TargetSnapshot{}
+	for rows.Next() {
+		var target TargetSnapshot
+		var endTime sql.NullTime
+		var errorMessage sql.NullString
+		var persisted sql.NullBool
+		err := rows.Scan(
+			&target.ID,
+			&target.SnapshotRunID,
+			&target.Alias,
+			&target.UploadPrefix,
+			&target.StartTime,
+			&endTime,
+			&target.Status,
+			&errorMessage,
+			&target.DryRun,
+			&target.Deleted,
+			&persisted,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if endTime.Valid {
+			target.EndTime = endTime.Time
+		}
+		if errorMessage.Valid {
+			target.ErrorMessage = errorMessage.String
+		}
+		if persisted.Valid {
+			target.Persisted = persisted.Bool
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
 }
