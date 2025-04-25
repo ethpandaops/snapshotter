@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -19,6 +20,7 @@ type SnapshotRun struct {
 	Status          string    `json:"status"` // "success" or "failed"
 	ErrorMessage    string    `json:"errorMessage"`
 	DryRun          bool      `json:"dryRun"`
+	Deleted         bool      `json:"deleted"`
 	TargetsSnapshot []TargetSnapshot
 }
 
@@ -32,6 +34,7 @@ type TargetSnapshot struct {
 	Status        string    `json:"status"` // "success" or "failed"
 	ErrorMessage  string    `json:"errorMessage"`
 	DryRun        bool      `json:"isDryRun"`
+	Deleted       bool      `json:"deleted"`
 }
 
 func NewDB(dbPath string) (*DB, error) {
@@ -40,8 +43,14 @@ func NewDB(dbPath string) (*DB, error) {
 		return nil, err
 	}
 
+	// Initialize schema first
 	if err := initSchema(db); err != nil {
 		return nil, err
+	}
+
+	// Run migrations after schema initialization
+	if err := RunMigrations(db); err != nil {
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
 	return &DB{db: db}, nil
@@ -148,7 +157,7 @@ func (d *DB) UpdateTargetSnapshotStatus(id int64, status string, errorMsg string
 
 func (d *DB) GetTargetSnapshotsForRun(runID int64) (targets []TargetSnapshot, err error) {
 	rows, err := d.db.Query(`
-		SELECT id, snapshot_run_id, alias, upload_prefix, start_time, end_time, status, error_message, dry_run
+		SELECT id, snapshot_run_id, alias, upload_prefix, start_time, end_time, status, error_message, dry_run, deleted
 		FROM target_snapshots
 		WHERE snapshot_run_id = ?
 		ORDER BY start_time ASC
@@ -179,6 +188,7 @@ func (d *DB) GetTargetSnapshotsForRun(runID int64) (targets []TargetSnapshot, er
 			&target.Status,
 			&errorMessage,
 			&target.DryRun,
+			&target.Deleted,
 		)
 		if err != nil {
 			return nil, err
@@ -196,7 +206,7 @@ func (d *DB) GetTargetSnapshotsForRun(runID int64) (targets []TargetSnapshot, er
 
 func (d *DB) GetAllRuns() (runs []SnapshotRun, err error) {
 	rows, err := d.db.Query(`
-		SELECT id, block_height, start_time, end_time, status, error_message, dry_run
+		SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted
 		FROM snapshot_runs
 		ORDER BY start_time DESC
 	`)
@@ -224,6 +234,7 @@ func (d *DB) GetAllRuns() (runs []SnapshotRun, err error) {
 			&run.Status,
 			&errorMessage,
 			&run.DryRun,
+			&run.Deleted,
 		)
 		if err != nil {
 			return nil, err
@@ -248,7 +259,7 @@ func (d *DB) GetAllRuns() (runs []SnapshotRun, err error) {
 
 func (d *DB) GetMostRecentRun() (*SnapshotRun, error) {
 	row := d.db.QueryRow(`
-		SELECT id, block_height, start_time, end_time, status, error_message, dry_run
+		SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted
 		FROM snapshot_runs
 		ORDER BY start_time DESC
 		LIMIT 1
@@ -265,6 +276,7 @@ func (d *DB) GetMostRecentRun() (*SnapshotRun, error) {
 		&run.Status,
 		&errorMessage,
 		&run.DryRun,
+		&run.Deleted,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -295,7 +307,7 @@ func (d *DB) GetPaginatedRuns(offset, limit int) (runs []SnapshotRun, err error)
 	}
 
 	rows, err := d.db.Query(`
-		SELECT id, block_height, start_time, end_time, status, error_message, dry_run
+		SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted
 		FROM snapshot_runs
 		ORDER BY start_time DESC
 		LIMIT ? OFFSET ?
@@ -324,6 +336,7 @@ func (d *DB) GetPaginatedRuns(offset, limit int) (runs []SnapshotRun, err error)
 			&run.Status,
 			&errorMessage,
 			&run.DryRun,
+			&run.Deleted,
 		)
 		if err != nil {
 			return nil, err
@@ -343,4 +356,76 @@ func (d *DB) GetPaginatedRuns(offset, limit int) (runs []SnapshotRun, err error)
 		runs = append(runs, run)
 	}
 	return runs, nil
+}
+
+func (d *DB) GetSuccessfulRunsForCleanup() (runs []SnapshotRun, err error) {
+	rows, err := d.db.Query(`
+		SELECT id, block_height, start_time, end_time, status, error_message, dry_run, deleted
+		FROM snapshot_runs
+		WHERE status = 'success' AND deleted = 0
+		ORDER BY block_height DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			if err == nil {
+				err = cerr
+			}
+		}
+	}()
+
+	runs = []SnapshotRun{}
+	for rows.Next() {
+		var run SnapshotRun
+		var endTime sql.NullTime
+		var errorMessage sql.NullString
+		var deleted bool
+		err := rows.Scan(
+			&run.ID,
+			&run.BlockHeight,
+			&run.StartTime,
+			&endTime,
+			&run.Status,
+			&errorMessage,
+			&run.DryRun,
+			&deleted,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if endTime.Valid {
+			run.EndTime = endTime.Time
+		}
+		if errorMessage.Valid {
+			run.ErrorMessage = errorMessage.String
+		}
+
+		// Get associated target snapshots
+		targets, err := d.GetTargetSnapshotsForRun(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		run.TargetsSnapshot = targets
+		runs = append(runs, run)
+	}
+	return runs, nil
+}
+
+func (d *DB) MarkSnapshotRunAsDeleted(id int64) error {
+	_, err := d.db.Exec(
+		"UPDATE snapshot_runs SET deleted = 1 WHERE id = ?",
+		id,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Also mark all associated target snapshots as deleted
+	_, err = d.db.Exec(
+		"UPDATE target_snapshots SET deleted = 1 WHERE snapshot_run_id = ?",
+		id,
+	)
+	return err
 }

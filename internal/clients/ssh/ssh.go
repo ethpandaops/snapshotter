@@ -28,7 +28,7 @@ type SSHClient struct {
 func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string, ignoreHostKeyCheck bool, useAgent bool, rclone *config.RCloneConfig, target *config.SSHTargetConfig) *SSHClient {
 
 	var hostkeyCallback ssh.HostKeyCallback
-	hostkeyCallback, err := knownhosts.New(os.ExpandEnv(knowHostsPath))
+	hostkeyCallback, err := knownhosts.New(knowHostsPath)
 	if err != nil {
 		log.WithError(err).Fatal("failed reading known SSH hosts file")
 	}
@@ -55,7 +55,7 @@ func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string
 		auths = append(auths, ssh.PublicKeysCallback(ag.Signers))
 	} else {
 		// Use private key
-		key, err := os.ReadFile(os.ExpandEnv(privateKeyPath))
+		key, err := os.ReadFile(privateKeyPath)
 		if err != nil {
 			log.WithError(err).Fatal("unable to read private key")
 		}
@@ -66,7 +66,7 @@ func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string
 				log.WithError(err).Fatal("unable to parse private key")
 			}
 		} else {
-			passphrase, err := os.ReadFile(os.ExpandEnv(privateKeyPassphrasePath))
+			passphrase, err := os.ReadFile(privateKeyPassphrasePath)
 			if err != nil {
 				log.WithError(err).Fatal("unable to read private key passphase file")
 			}
@@ -291,7 +291,7 @@ func (client *SSHClient) RestartBeacon() error {
 	return client.StartDockerContainer(client.TargetConfig.DockerContainers.Beacon)
 }
 
-func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPathPrefix string) error {
+func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPrefix string, blockNumber uint64) error {
 	cmd := "docker run --rm" +
 		" -v " + srcDir + ":" + srcDir
 
@@ -324,12 +324,32 @@ func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPathPrefix string
 		return err
 	}
 
+	// Get bucket name from RClone config environment variables
+	// This is set in config.ReadFromFile from the s3 configuration
+	bucketName := ""
+	if client.RCloneConfig.Env != nil {
+		if val, exists := client.RCloneConfig.Env["RCLONE_CONFIG_MYS3_BUCKET_NAME"]; exists && val != "" {
+			bucketName = val
+		}
+	}
+
+	// If not found in rclone env, use the default
+	if bucketName == "" {
+		log.Warn("Bucket name not found in RClone config environment variables, using default")
+		// Use a default if no environment variable is set
+		bucketName = "ethpandaops-ethereum-node-snapshots"
+	}
+
 	cmdVars := struct {
 		DataDir          string
 		UploadPathPrefix string
+		BucketName       string
+		BlockNumber      uint64
 	}{
 		DataDir:          srcDir,
-		UploadPathPrefix: uploadPathPrefix,
+		UploadPathPrefix: uploadPrefix,
+		BucketName:       bucketName,
+		BlockNumber:      blockNumber,
 	}
 
 	var rcloneCmd bytes.Buffer
