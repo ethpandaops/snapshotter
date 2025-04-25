@@ -98,3 +98,97 @@ curl -s -L https://snapshots.ethpandaops.io/sepolia/geth/latest/snapshot.tar.zst
 
 # Or.. use a docker container with all the tools you need (curl, zstd, tar) and untar it on the fly
 docker run --rm -it -v $PATH_TO_YOUR_GETH_DATA_DIR:/data --entrypoint "/bin/sh" alpine -c "apk add --no-cache curl tar zstd && curl -s -L https://snapshots.ethpandaops.io/sepolia/geth/latest/snapshot.tar.zst | tar -I zstd -xvf - -C /data"
+```
+
+## Configuration Options
+
+Check a full example config file [here](config.example.yaml).
+
+### Snapshot Cleanup
+
+The snapshotter now includes an automatic cleanup feature that can delete old snapshots. This helps manage storage space by keeping only the most recent snapshots. The feature can be configured in the `config.yaml` file:
+
+```yaml
+global:
+  snapshots:
+    cleanup:
+      enabled: true           # Enable or disable the cleanup feature
+      keep_count: 3           # Number of most recent snapshots to keep
+      check_interval_hours: 24 # How often to check for snapshots to clean up (in hours)
+```
+
+When enabled, the cleanup routine will:
+1. Run at the specified interval
+2. Keep the specified number of most recent successful snapshots
+3. Delete older snapshots from storage
+4. Mark deleted snapshots in the database
+
+## API Authentication
+
+To protect sensitive endpoints like `persist` and `unpersist`, the snapshotter supports token-based authentication. These endpoints allow you to mark snapshots as persisted, ensuring they won't be deleted by the cleanup routine.
+
+### Configuration
+
+Add an API token in your config file:
+
+```yaml
+server:
+  listen_addr: 0.0.0.0:5001
+  auth:
+    api_token: "your-secure-api-token-here"
+```
+
+If no token is configured, authentication will be disabled, and a warning will be logged at startup.
+
+### Making Authenticated Requests
+
+To make authenticated requests, include the token in the `Authorization` header:
+
+```
+Authorization: Bearer your-secure-api-token-here
+```
+
+Example using curl:
+
+```bash
+# Mark a snapshot run as persisted
+curl -X POST "http://localhost:5001/api/v1/runs/123/persist" \
+  -H "Authorization: Bearer your-secure-api-token-here"
+
+# Mark a snapshot run as not persisted
+curl -X POST "http://localhost:5001/api/v1/runs/123/unpersist" \
+  -H "Authorization: Bearer your-secure-api-token-here"
+
+# Mark a specific target snapshot as persisted
+curl -X POST "http://localhost:5001/api/v1/targets/456/persist" \
+  -H "Authorization: Bearer your-secure-api-token-here"
+
+# Mark a specific target snapshot as not persisted
+curl -X POST "http://localhost:5001/api/v1/targets/456/unpersist" \
+  -H "Authorization: Bearer your-secure-api-token-here"
+```
+
+### Protected Endpoints
+
+The following endpoints require authentication:
+
+- `POST /api/v1/runs/{id}/persist` - Mark a snapshot run as persisted (won't be deleted)
+- `POST /api/v1/runs/{id}/unpersist` - Mark a snapshot run as not persisted (can be deleted)
+- `POST /api/v1/targets/{id}/persist` - Mark a specific target snapshot as persisted (won't be deleted)
+- `POST /api/v1/targets/{id}/unpersist` - Mark a specific target snapshot as not persisted (can be deleted)
+
+Other endpoints remain publicly accessible:
+
+- `GET /api/v1/runs` - List all snapshot runs
+- `GET /api/v1/runs/{id}` - Get details about a specific snapshot run
+- `GET /api/v1/targets/{id}` - Get details about a specific target snapshot
+- `GET /api/v1/status` - Get snapshotter status
+
+### Persistence Levels
+
+The snapshotter supports two levels of persistence:
+
+1. **Run-level persistence**: When you persist a snapshot run, all targets within that run are protected from cleanup.
+2. **Target-level persistence**: You can persist individual target snapshots, protecting only specific client/node data.
+
+This two-level approach gives you fine-grained control over which snapshots to retain.

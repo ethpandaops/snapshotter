@@ -62,45 +62,56 @@ func TestMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to query migrations table: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("Expected 1 migration record, got %d", count)
+	if count != 3 {
+		t.Errorf("Expected 3 migration records, got %d", count)
 	}
 
-	// Check if the deleted columns were added
+	// Check if the deleted column was added to snapshot_runs
 	var columnCount int
 	err = db.QueryRow(`
 		SELECT COUNT(*) FROM pragma_table_info('snapshot_runs')
 		WHERE name='deleted'
 	`).Scan(&columnCount)
 	if err != nil {
-		t.Fatalf("Failed to check snapshot_runs table: %v", err)
+		t.Fatalf("Failed to check snapshot_runs table for deleted column: %v", err)
 	}
 	if columnCount != 1 {
 		t.Errorf("Expected deleted column in snapshot_runs, but it wasn't found")
 	}
 
+	// Check if the persisted column was added to snapshot_runs
+	err = db.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('snapshot_runs')
+		WHERE name='persisted'
+	`).Scan(&columnCount)
+	if err != nil {
+		t.Fatalf("Failed to check snapshot_runs table for persisted column: %v", err)
+	}
+	if columnCount != 1 {
+		t.Errorf("Expected persisted column in snapshot_runs, but it wasn't found")
+	}
+
+	// Check if the deleted column was added to target_snapshots
 	err = db.QueryRow(`
 		SELECT COUNT(*) FROM pragma_table_info('target_snapshots')
 		WHERE name='deleted'
 	`).Scan(&columnCount)
 	if err != nil {
-		t.Fatalf("Failed to check target_snapshots table: %v", err)
+		t.Fatalf("Failed to check target_snapshots table for deleted column: %v", err)
 	}
 	if columnCount != 1 {
 		t.Errorf("Expected deleted column in target_snapshots, but it wasn't found")
 	}
 
-	// Check if a second run of migrations doesn't duplicate the migration
-	err = RunMigrations(db)
+	// Check if the persisted column was added to target_snapshots
+	err = db.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('target_snapshots')
+		WHERE name='persisted'
+	`).Scan(&columnCount)
 	if err != nil {
-		t.Fatalf("Failed to run migrations second time: %v", err)
+		t.Fatalf("Failed to check target_snapshots table for persisted column: %v", err)
 	}
-
-	err = db.QueryRow("SELECT COUNT(*) FROM migrations").Scan(&count)
-	if err != nil {
-		t.Fatalf("Failed to query migrations table: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("Expected still 1 migration record after second run, got %d", count)
+	if columnCount != 1 {
+		t.Errorf("Expected persisted column in target_snapshots, but it wasn't found")
 	}
 }

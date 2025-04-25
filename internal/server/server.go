@@ -30,14 +30,55 @@ func (s *Server) Start() error {
 	r := mux.NewRouter()
 	r.HandleFunc("/api/v1/runs", s.handleGetRuns).Methods("GET")
 	r.HandleFunc("/api/v1/status", s.handleGetStatus).Methods("GET")
+	r.HandleFunc("/api/v1/runs/{id}", s.handleGetRun).Methods("GET")
+	r.HandleFunc("/api/v1/targets/{id}", s.handleGetTargetSnapshot).Methods("GET")
+
+	// Create a subrouter for authenticated endpoints
+	authRouter := r.PathPrefix("/api/v1").Subrouter()
+	authRouter.Use(s.authMiddleware)
+	authRouter.HandleFunc("/runs/{id}/persist", s.handleSetPersisted).Methods("POST")
+	authRouter.HandleFunc("/runs/{id}/unpersist", s.handleSetUnpersisted).Methods("POST")
+	authRouter.HandleFunc("/targets/{id}/persist", s.handleSetTargetPersisted).Methods("POST")
+	authRouter.HandleFunc("/targets/{id}/unpersist", s.handleSetTargetUnpersisted).Methods("POST")
 
 	listenAddr := s.cfg.Server.ListenAddr
 	if listenAddr == "" {
 		listenAddr = "0.0.0.0:5001"
 	}
 
+	// Log API authentication status
+	if s.cfg.Server.Auth.APIToken == "" {
+		log.Fatal("API authentication needs to be set - no API token configured")
+	}
+
 	log.WithField("addr", listenAddr).Info("starting HTTP server")
 	return http.ListenAndServe(listenAddr, r)
+}
+
+// authMiddleware is a middleware function that checks for a valid API token
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check for token in Authorization header
+		token := r.Header.Get("Authorization")
+		if token == "" {
+			http.Error(w, "Missing Authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		// Handle "Bearer <token>" format
+		if len(token) > 7 && token[:7] == "Bearer " {
+			token = token[7:]
+		}
+
+		// Validate token
+		if token != s.cfg.Server.Auth.APIToken {
+			http.Error(w, "Invalid API token", http.StatusUnauthorized)
+			return
+		}
+
+		// Token is valid, proceed to the next handler
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +118,116 @@ func (s *Server) handleGetRuns(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid run ID", http.StatusBadRequest)
+		return
+	}
+
+	run, err := s.db.GetSnapshotRunByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if run == nil {
+		http.Error(w, "snapshot run not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(run); err != nil {
+		log.WithError(err).Error("failed to encode run")
+		http.Error(w, "failed to encode run", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleSetPersisted(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid run ID", http.StatusBadRequest)
+		return
+	}
+
+	// Check if the run exists
+	run, err := s.db.GetSnapshotRunByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if run == nil {
+		http.Error(w, "snapshot run not found", http.StatusNotFound)
+		return
+	}
+
+	// Set the persisted flag
+	if err := s.db.SetSnapshotRunPersisted(id, true); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get the updated run
+	run, err = s.db.GetSnapshotRunByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(run); err != nil {
+		log.WithError(err).Error("failed to encode run")
+		http.Error(w, "failed to encode run", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleSetUnpersisted(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid run ID", http.StatusBadRequest)
+		return
+	}
+
+	// Check if the run exists
+	run, err := s.db.GetSnapshotRunByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if run == nil {
+		http.Error(w, "snapshot run not found", http.StatusNotFound)
+		return
+	}
+
+	// Set the persisted flag
+	if err := s.db.SetSnapshotRunPersisted(id, false); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get the updated run
+	run, err = s.db.GetSnapshotRunByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(run); err != nil {
+		log.WithError(err).Error("failed to encode run")
+		http.Error(w, "failed to encode run", http.StatusInternalServerError)
+		return
+	}
+}
+
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	run, err := s.db.GetMostRecentRun()
@@ -95,6 +246,116 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.WithError(err).Error("failed to encode status")
 		http.Error(w, "failed to encode status", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleGetTargetSnapshot(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid target ID", http.StatusBadRequest)
+		return
+	}
+
+	target, err := s.db.GetTargetSnapshotByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if target == nil {
+		http.Error(w, "target snapshot not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(target); err != nil {
+		log.WithError(err).Error("failed to encode target snapshot")
+		http.Error(w, "failed to encode target snapshot", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleSetTargetPersisted(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid target ID", http.StatusBadRequest)
+		return
+	}
+
+	// Check if the target exists
+	target, err := s.db.GetTargetSnapshotByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if target == nil {
+		http.Error(w, "target snapshot not found", http.StatusNotFound)
+		return
+	}
+
+	// Set the persisted flag
+	if err := s.db.SetTargetSnapshotPersisted(id, true); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get the updated target
+	target, err = s.db.GetTargetSnapshotByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(target); err != nil {
+		log.WithError(err).Error("failed to encode target snapshot")
+		http.Error(w, "failed to encode target snapshot", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *Server) handleSetTargetUnpersisted(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid target ID", http.StatusBadRequest)
+		return
+	}
+
+	// Check if the target exists
+	target, err := s.db.GetTargetSnapshotByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if target == nil {
+		http.Error(w, "target snapshot not found", http.StatusNotFound)
+		return
+	}
+
+	// Set the persisted flag
+	if err := s.db.SetTargetSnapshotPersisted(id, false); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get the updated target
+	target, err = s.db.GetTargetSnapshotByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(target); err != nil {
+		log.WithError(err).Error("failed to encode target snapshot")
+		http.Error(w, "failed to encode target snapshot", http.StatusInternalServerError)
 		return
 	}
 }

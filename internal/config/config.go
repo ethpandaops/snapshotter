@@ -34,6 +34,9 @@ type Config struct {
 	} `yaml:"global"`
 	Server struct {
 		ListenAddr string `yaml:"listen_addr"`
+		Auth       struct {
+			APIToken string `yaml:"api_token"`
+		} `yaml:"auth"`
 	} `yaml:"server"`
 	Targets struct {
 		SSH []SSHTargetConfig `yaml:"ssh"`
