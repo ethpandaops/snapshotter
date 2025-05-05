@@ -25,10 +25,16 @@ type SSHClient struct {
 	RCloneConfig *config.RCloneConfig
 }
 
+// SnapshotMetadata represents metadata about a snapshot
+type SnapshotMetadata struct {
+	DockerImage string            `json:"docker_image,omitempty"`
+	Static      map[string]string `json:"static,omitempty"`
+}
+
 func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string, ignoreHostKeyCheck bool, useAgent bool, rclone *config.RCloneConfig, target *config.SSHTargetConfig) *SSHClient {
 
 	var hostkeyCallback ssh.HostKeyCallback
-	hostkeyCallback, err := knownhosts.New(os.ExpandEnv(knowHostsPath))
+	hostkeyCallback, err := knownhosts.New(knowHostsPath)
 	if err != nil {
 		log.WithError(err).Fatal("failed reading known SSH hosts file")
 	}
@@ -55,7 +61,7 @@ func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string
 		auths = append(auths, ssh.PublicKeysCallback(ag.Signers))
 	} else {
 		// Use private key
-		key, err := os.ReadFile(os.ExpandEnv(privateKeyPath))
+		key, err := os.ReadFile(privateKeyPath)
 		if err != nil {
 			log.WithError(err).Fatal("unable to read private key")
 		}
@@ -66,7 +72,7 @@ func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string
 				log.WithError(err).Fatal("unable to parse private key")
 			}
 		} else {
-			passphrase, err := os.ReadFile(os.ExpandEnv(privateKeyPassphrasePath))
+			passphrase, err := os.ReadFile(privateKeyPassphrasePath)
 			if err != nil {
 				log.WithError(err).Fatal("unable to read private key passphase file")
 			}
@@ -108,7 +114,12 @@ func (client *SSHClient) RunCommand(cmd string) (string, error) {
 	}
 	defer func() {
 		if err := session.Close(); err != nil {
-			log.WithError(err).Warn("failed to close SSH session")
+			// Check if error is EOF, which is expected when the server already closed the connection
+			if err.Error() == "EOF" {
+				log.WithField("host", client.TargetConfig.Host).Debug("SSH session already closed by server (EOF)")
+			} else {
+				log.WithError(err).Warn("failed to close SSH session")
+			}
 		}
 	}()
 
@@ -286,28 +297,109 @@ func (client *SSHClient) RestartBeacon() error {
 	return client.StartDockerContainer(client.TargetConfig.DockerContainers.Beacon)
 }
 
-func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPathPrefix string) error {
-	cmd := "docker run --rm" +
-		" -v " + srcDir + ":" + srcDir
-	if client.RCloneConfig.Entrypoint != "" {
-		cmd += " --entrypoint " + client.RCloneConfig.Entrypoint
+func (client *SSHClient) GetDockerContainerImage(containerName string) (string, error) {
+	cmd := fmt.Sprintf(`docker inspect --format='{{.Config.Image}}' "%s"`, containerName)
+	out, err := client.RunCommand(cmd)
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"container": containerName,
+			"output":    out,
+		}).Warn("failed to get container image")
+		return "", err
 	}
-	for k, v := range client.RCloneConfig.Env {
-		cmd += fmt.Sprintf(" -e %s=%s", k, v)
+	return strings.TrimSpace(out), nil
+}
+
+func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPrefix string, blockNumber uint64) error {
+	// Get Docker image information for metadata
+	metadata := SnapshotMetadata{
+		Static: client.TargetConfig.Metadata,
 	}
 
-	tmpl, err := template.New("cmd").Parse(client.RCloneConfig.CommandTemplate)
+	// Get the execution container image if available
+	if client.TargetConfig.DockerContainers.Execution != "" {
+		dockerImage, err := client.GetDockerContainerImage(client.TargetConfig.DockerContainers.Execution)
+		if err == nil {
+			metadata.DockerImage = dockerImage
+		} else {
+			log.WithError(err).Warn("failed to get execution container image for metadata")
+		}
+	}
+
+	// Create metadata JSON file
+	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		log.WithError(err).Error("failed to marshal snapshot metadata")
+		return err
+	}
+
+	// Write metadata to file
+	metadataFile := fmt.Sprintf("%s/_snapshot_metadata.json", srcDir)
+	metadataCmd := fmt.Sprintf(`echo '%s' | sudo tee %s`, string(metadataJSON), metadataFile)
+	_, err = client.RunCommand(metadataCmd)
+	if err != nil {
+		log.WithError(err).Error("failed to write snapshot metadata file")
+		return err
+	}
+
+	cmd := "docker run --rm" +
+		" -v " + srcDir + ":" + srcDir
+
+	// Use default entrypoint if not specified
+	entrypoint := client.RCloneConfig.Entrypoint
+	if entrypoint == "" {
+		entrypoint = config.GetDefaultRCloneConfig().Entrypoint
+	}
+	cmd += " --entrypoint " + entrypoint
+
+	// Add environment variables
+	if client.RCloneConfig.Env != nil {
+		for k, v := range client.RCloneConfig.Env {
+			cmd += fmt.Sprintf(" -e %s=%s", k, v)
+		}
+	}
+
+	// Get command template, using default if not specified
+	cmdTemplate := client.RCloneConfig.CommandTemplate
+	if cmdTemplate == "" {
+		// If we don't have the template directly, use the default from config package
+		// This fallback should rarely happen since we set defaults in config.ReadFromFile
+		log.Debug("RClone command template not specified, using default from config package")
+		cmdTemplate = config.GetDefaultRCloneConfig().CommandTemplate
+	}
+
+	tmpl, err := template.New("cmd").Parse(cmdTemplate)
 	if err != nil {
 		log.WithError(err).Error("failed to parse rclone cmd template")
 		return err
 	}
 
+	// Get bucket name from RClone config environment variables
+	// This is set in config.ReadFromFile from the s3 configuration
+	bucketName := ""
+	if client.RCloneConfig.Env != nil {
+		if val, exists := client.RCloneConfig.Env["RCLONE_CONFIG_MYS3_BUCKET_NAME"]; exists && val != "" {
+			bucketName = val
+		}
+	}
+
+	// If not found in rclone env, use the default
+	if bucketName == "" {
+		log.Warn("Bucket name not found in RClone config environment variables, using default")
+		// Use a default if no environment variable is set
+		bucketName = "ethpandaops-ethereum-node-snapshots"
+	}
+
 	cmdVars := struct {
 		DataDir          string
 		UploadPathPrefix string
+		BucketName       string
+		BlockNumber      uint64
 	}{
 		DataDir:          srcDir,
-		UploadPathPrefix: uploadPathPrefix,
+		UploadPathPrefix: uploadPrefix,
+		BucketName:       bucketName,
+		BlockNumber:      blockNumber,
 	}
 
 	var rcloneCmd bytes.Buffer
@@ -316,7 +408,13 @@ func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPathPrefix string
 		return err
 	}
 
-	cmd += " rclone/rclone:" + client.RCloneConfig.Version + " " + rcloneCmd.String()
+	// Use default version if not specified
+	version := client.RCloneConfig.Version
+	if version == "" {
+		version = config.GetDefaultRCloneConfig().Version
+	}
+
+	cmd += " rclone/rclone:" + version + " " + rcloneCmd.String()
 	out, err := client.RunCommand(cmd)
 	if err != nil {
 		log.WithError(err).WithField("output", out).Error("failed to rclone sync")

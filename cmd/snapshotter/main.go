@@ -32,7 +32,12 @@ var rootCmd = &cobra.Command{
 			}
 		}()
 
+		// Start the cleanup routine
+		go ss.StartCleanupRoutine()
+
+		// Start the snapshot routine
 		ss.StartPeriodicPolling()
+
 	},
 }
 
