@@ -11,14 +11,22 @@ import (
 func TestMigrations(t *testing.T) {
 	// Create a temporary database file
 	dbPath := "test_migrations.db"
-	defer os.Remove(dbPath)
+	defer func() {
+		if err := os.Remove(dbPath); err != nil {
+			t.Logf("Failed to remove test database: %v", err)
+		}
+	}()
 
 	// Open the database
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("Failed to close database: %v", err)
+		}
+	}()
 
 	// Initialize the schema (without deleted columns)
 	schema := `

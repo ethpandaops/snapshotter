@@ -151,7 +151,11 @@ func RunMigrations(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("failed to query migrations: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			log.WithError(cerr).Error("Failed to close rows")
+		}
+	}()
 
 	appliedMigrations := make(map[int]bool)
 	for rows.Next() {
@@ -177,14 +181,18 @@ func RunMigrations(db *sql.DB) error {
 			}
 
 			if err := migration.Migrate(db); err != nil {
-				tx.Rollback()
+				if rbErr := tx.Rollback(); rbErr != nil {
+					log.WithError(rbErr).Error("Failed to rollback transaction")
+				}
 				return fmt.Errorf("failed to apply migration %d: %w", migration.ID, err)
 			}
 
 			// Record the migration as applied
 			_, err = tx.Exec("INSERT INTO migrations (id, name) VALUES (?, ?)", migration.ID, migration.Name)
 			if err != nil {
-				tx.Rollback()
+				if rbErr := tx.Rollback(); rbErr != nil {
+					log.WithError(rbErr).Error("Failed to rollback transaction")
+				}
 				return fmt.Errorf("failed to record migration %d: %w", migration.ID, err)
 			}
 

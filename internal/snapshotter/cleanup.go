@@ -224,31 +224,3 @@ func (s *SnapShotter) deleteTargetSnapshotFiles(target db.TargetSnapshot) error 
 
 	return nil
 }
-
-// Legacy method - kept for compatibility, now uses the new per-target approach
-func (s *SnapShotter) deleteSnapshotFiles(run db.SnapshotRun) error {
-	var firstErr error
-
-	for _, target := range run.TargetsSnapshot {
-		// Skip targets that failed during snapshot creation
-		if target.Status != "success" {
-			continue
-		}
-
-		// Skip targets that are persisted
-		if target.Persisted {
-			log.WithFields(log.Fields{
-				"target_alias": target.Alias,
-				"run_id":       run.ID,
-			}).Info("skipping persisted target snapshot")
-			continue
-		}
-
-		err := s.deleteTargetSnapshotFiles(target)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	return firstErr
-}

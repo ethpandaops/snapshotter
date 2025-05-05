@@ -7,9 +7,15 @@ import (
 
 func TestEnvironmentVariableExpansion(t *testing.T) {
 	// Set environment variables for testing
-	os.Setenv("TEST_S3_ENDPOINT", "https://test-s3-endpoint.com")
-	os.Setenv("TEST_S3_BUCKET", "test-bucket")
-	os.Setenv("TEST_S3_REGION", "test-region")
+	if err := os.Setenv("TEST_S3_ENDPOINT", "https://test-s3-endpoint.com"); err != nil {
+		t.Fatalf("Failed to set TEST_S3_ENDPOINT: %v", err)
+	}
+	if err := os.Setenv("TEST_S3_BUCKET", "test-bucket"); err != nil {
+		t.Fatalf("Failed to set TEST_S3_BUCKET: %v", err)
+	}
+	if err := os.Setenv("TEST_S3_REGION", "test-region"); err != nil {
+		t.Fatalf("Failed to set TEST_S3_REGION: %v", err)
+	}
 
 	// Create a temporary config file
 	tmpConfigContent := `
@@ -59,7 +65,11 @@ targets:
 	if err != nil {
 		t.Fatalf("Failed to create temp config file: %v", err)
 	}
-	defer os.Remove(tmpConfigPath)
+	defer func() {
+		if err := os.Remove(tmpConfigPath); err != nil {
+			t.Errorf("Failed to remove temporary config file: %v", err)
+		}
+	}()
 
 	// Read the config
 	cfg, err := ReadFromFile(tmpConfigPath)
