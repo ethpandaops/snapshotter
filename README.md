@@ -14,7 +14,7 @@ The data snapshots are packaged into a [tar](https://man7.org/linux/man-pages/ma
 Client | Args
 --- | ---
 geth | `--state.scheme=path --cache.preimages`
-nethermind | `--prune.mode=full`
+nethermind | None
 besu | `--data-storage-format=BONSAI`
 erigon | `--prune.mode=full`
 reth | `--full`
