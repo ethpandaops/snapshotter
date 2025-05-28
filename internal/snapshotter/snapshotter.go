@@ -1,6 +1,7 @@
 package snapshotter
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,12 +19,23 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// S3ClientInterface defines the interface for S3 operations needed by the snapshotter
+type S3ClientInterface interface {
+	Initialize() error
+	GetBucketName() string
+	GetEndpoint() string
+	GetRegion() string
+	GetRootPrefix() string
+	PutObject(ctx context.Context, bucket, key string, content []byte) error
+	DeleteDirectory(ctx context.Context, bucket, prefix string) error
+}
+
 type SnapShotter struct {
 	cfg        *config.Config
 	status     *types.SnapshotterStatus
 	sshTargets []*sshTarget
 	db         *db.DB
-	s3Client   *s3Client.S3Client
+	s3Client   S3ClientInterface
 }
 
 type sshTarget struct {
@@ -658,9 +670,51 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 	log.WithFields(log.Fields{
 		"took": time.Since(t1),
 	}).Info("finished uploading all data snapshots")
+
+	// Create or update the "latest" file in S3 with the block number
+	if err := s.updateLatestFile(); err != nil {
+		log.WithError(err).Error("failed to update latest file in S3")
+		// Don't return error here as the snapshots were uploaded successfully
+	}
+
 	return nil
 }
 
 func (s *SnapShotter) GetDB() *db.DB {
 	return s.db
+}
+
+// updateLatestFile creates or updates the "latest" file in S3 with the current block number
+func (s *SnapShotter) updateLatestFile() error {
+	if s.cfg.Global.Snapshots.DryRun {
+		log.WithField("block", s.status.ProcessedBlockHeight).Warn("dry run mode enabled - skipping latest file update")
+		return nil
+	}
+
+	ctx := context.Background()
+	bucketName := s.s3Client.GetBucketName()
+	if bucketName == "" {
+		return fmt.Errorf("bucket name not configured in S3 settings")
+	}
+
+	// Get the root prefix and construct the key
+	rootPrefix := s.s3Client.GetRootPrefix()
+	key := rootPrefix + "latest"
+
+	// Convert block number to string
+	blockNumberStr := fmt.Sprintf("%d", s.status.ProcessedBlockHeight)
+
+	// Upload the latest file
+	err := s.s3Client.PutObject(ctx, bucketName, key, []byte(blockNumberStr))
+	if err != nil {
+		return fmt.Errorf("failed to upload latest file: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"bucket": bucketName,
+		"key":    key,
+		"block":  s.status.ProcessedBlockHeight,
+	}).Info("updated latest file in S3")
+
+	return nil
 }
