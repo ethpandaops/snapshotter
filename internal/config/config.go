@@ -53,6 +53,7 @@ type S3Config struct {
 	BucketName string `yaml:"bucket_name"`
 	Region     string `yaml:"region"`
 	Endpoint   string `yaml:"endpoint"`
+	RootPrefix string `yaml:"root_prefix"`
 }
 
 type SSHTargetConfig struct {
@@ -186,6 +187,7 @@ func ReadFromFile(path string) (*Config, error) {
 	config.Global.Snapshots.S3.Endpoint = os.ExpandEnv(config.Global.Snapshots.S3.Endpoint)
 	config.Global.Snapshots.S3.BucketName = os.ExpandEnv(config.Global.Snapshots.S3.BucketName)
 	config.Global.Snapshots.S3.Region = os.ExpandEnv(config.Global.Snapshots.S3.Region)
+	config.Global.Snapshots.S3.RootPrefix = os.ExpandEnv(config.Global.Snapshots.S3.RootPrefix)
 
 	// Expand environment variables in SSH configuration
 	config.Global.SSH.PrivateKeyPath = os.ExpandEnv(config.Global.SSH.PrivateKeyPath)

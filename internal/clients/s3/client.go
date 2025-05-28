@@ -134,6 +134,18 @@ func (c *S3Client) GetRegion() string {
 	return c.region
 }
 
+// GetRootPrefix returns the configured root prefix with a trailing slash if not empty
+func (c *S3Client) GetRootPrefix() string {
+	if c.cfg != nil && c.cfg.RootPrefix != "" {
+		prefix := c.cfg.RootPrefix
+		if !strings.HasSuffix(prefix, "/") {
+			prefix = prefix + "/"
+		}
+		return prefix
+	}
+	return ""
+}
+
 // ParseS3URI parses an S3 URI into bucket and key
 // Format: s3://bucket/key
 func ParseS3URI(uri string) (bucket, key string, err error) {
@@ -261,6 +273,37 @@ func (c *S3Client) DeleteDirectory(ctx context.Context, bucket, prefix string) e
 		"prefix": prefix,
 		"count":  len(objectsToDelete),
 	}).Info("Successfully deleted all objects")
+
+	return nil
+}
+
+// PutObject uploads content to S3
+func (c *S3Client) PutObject(ctx context.Context, bucket, key string, content []byte) error {
+	if err := c.ensureInitialized(); err != nil {
+		return err
+	}
+
+	// Use default bucket if not specified
+	if bucket == "" {
+		if c.bucketName == "" {
+			return fmt.Errorf("bucket name not specified and no default bucket configured")
+		}
+		bucket = c.bucketName
+	}
+
+	_, err := c.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   strings.NewReader(string(content)),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to upload S3 object %s/%s: %w", bucket, key, err)
+	}
+
+	log.WithFields(log.Fields{
+		"bucket": bucket,
+		"key":    key,
+	}).Debug("Uploaded S3 object")
 
 	return nil
 }
