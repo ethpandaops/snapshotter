@@ -96,7 +96,7 @@ tar -I zstd \\
 --exclude=./key \\
 --exclude=./discovery-secret \\
 -cvf - . \\
-| rclone rcat --s3-chunk-size 150M mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }}/snapshot.tar.zst &&
+| rclone rcat --s3-chunk-size 300M mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }}/snapshot.tar.zst &&
 rclone copy {{ .DataDir }}/_snapshot_eth_getBlockByNumber.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
 rclone copy {{ .DataDir }}/_snapshot_web3_clientVersion.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
 rclone copy {{ .DataDir }}/_snapshot_metadata.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
