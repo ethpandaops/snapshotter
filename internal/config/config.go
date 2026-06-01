@@ -91,7 +91,7 @@ const DefaultRCloneCommandTemplate = `-ac "
 apk add --no-cache tar zstd jq &&
 cd {{ .DataDir }} &&
 cat {{ .DataDir }}/_snapshot_metadata.json | jq . &&
-tar -I zstd \\
+tar -I 'zstd -T64' \\
 --exclude=./nodekey \\
 --exclude=./key \\
 --exclude=./discovery-secret \\
@@ -136,7 +136,7 @@ func ReadFromFile(path string) (*Config, error) {
 	}
 
 	if config.Global.Snapshots.RClone.Version == "" {
-		config.Global.Snapshots.RClone.Version = "1.65.2"
+		config.Global.Snapshots.RClone.Version = "1.74.2"
 	}
 
 	if config.Global.Snapshots.RClone.Entrypoint == "" {
