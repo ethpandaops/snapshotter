@@ -96,6 +96,7 @@ func Init(cfg *config.Config) (*SnapShotter, error) {
 				cfg.Global.SSH.InsecureIgnoreHostKey,
 				cfg.Global.SSH.UseAgent,
 				&cfg.Global.Snapshots.RClone,
+				&cfg.Global.Snapshots.Preimages,
 				&cfg.Targets.SSH[i],
 			),
 			cfg: &tt,
@@ -433,6 +434,40 @@ func (s *SnapShotter) PrepareForSnapshot() error {
 		return nil
 	}
 
+	// Preflight: pull pinned preimage images while everything still runs, so
+	// a required-target failure aborts with zero downtime.
+	pullGroup := errgroup.Group{}
+	for _, t := range s.sshTargets {
+		if !t.cfg.Preimages.Enabled {
+			continue
+		}
+		cl := t.client
+		tt := t
+		if tt.cfg.Preimages.Image == "" {
+			// Auto-detect needs no pull, but requires an execution container.
+			if tt.cfg.DockerContainers.Execution == "" {
+				err := fmt.Errorf("preimages enabled for %s but no image pinned and no execution container configured", tt.cfg.Alias)
+				if tt.cfg.Preimages.Required {
+					return err
+				}
+				log.WithError(err).Warn("preimages misconfigured (best-effort)")
+			}
+			continue
+		}
+		pullGroup.Go(func() error {
+			if err := cl.PullDockerImage(tt.cfg.Preimages.Image); err != nil {
+				if tt.cfg.Preimages.Required {
+					return fmt.Errorf("preflight pull of preimages image failed for %s: %w", tt.cfg.Alias, err)
+				}
+				log.WithError(err).Warnf("preflight pull of preimages image failed for %s (best-effort)", tt.cfg.Alias)
+			}
+			return nil
+		})
+	}
+	if err := pullGroup.Wait(); err != nil {
+		return err
+	}
+
 	// Stop snooper
 	log.Info("stopping snooper container across targets")
 	group := errgroup.Group{}
@@ -641,6 +676,22 @@ func (s *SnapShotter) UploadSnapshot(runID int64) error {
 		}
 
 		group.Go(func() error {
+			// Export and upload state preimages first: the per-client `latest`
+			// pointer is the final step of the snapshot upload chain, so it
+			// only ever advances after the preimages artifact is in place.
+			if tt.cfg.Preimages.Enabled {
+				if err := cl.ExportAndUploadPreimages(tt.cfg.DataDir, tt.cfg.UploadPrefix, s.status.ProcessedBlockHeight); err != nil {
+					if tt.cfg.Preimages.Required {
+						if errDB := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "failed", "preimages: "+err.Error()); errDB != nil {
+							log.WithError(errDB).Error("failed to update target snapshot status")
+						}
+						log.WithError(err).Errorf("preimages export/upload failed for required target %s", cl.TargetConfig.Alias)
+						return err
+					}
+					log.WithError(err).Warnf("preimages export/upload failed for %s (best-effort, continuing with snapshot)", cl.TargetConfig.Alias)
+				}
+			}
+
 			err := cl.RCloneSyncLocalToRemote(tt.cfg.DataDir, tt.cfg.UploadPrefix, s.status.ProcessedBlockHeight)
 			if err != nil {
 				if errDB := s.db.UpdateTargetSnapshotStatus(targetSnapshot.ID, "failed", err.Error()); errDB != nil {
