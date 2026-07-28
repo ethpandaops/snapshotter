@@ -365,7 +365,7 @@ func (s *SnapShotter) StartPeriodicPolling() {
 	}
 }
 
-func (s *SnapShotter) CreateSnapshot() error {
+func (s *SnapShotter) CreateSnapshot() (err error) {
 	s.status.Lock()
 	if s.status.SnapshotInProgress {
 		s.status.Unlock()
@@ -392,6 +392,28 @@ func (s *SnapShotter) CreateSnapshot() error {
 		"dry_run": run.DryRun,
 	}).Info("starting snapshot")
 
+	// PrepareForSnapshot stops the snooper and EL on every target before it can fail, and
+	// PostSnapshotStart is the only code that starts them again. Every return below has to go
+	// through it: polling needs a synced EL to trigger the next run, so a target left stopped
+	// stays stopped until someone intervenes by hand.
+	defer func() {
+		errStart := s.PostSnapshotStart()
+		if errStart == nil {
+			return
+		}
+
+		log.WithError(errStart).Error("failed to restore service after snapshot")
+
+		// Only claim the run's status if nothing else already failed, so that a restart failure
+		// does not overwrite the reason the snapshot itself was abandoned.
+		if err == nil {
+			err = errStart
+			if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", errStart.Error()); errDB != nil {
+				log.WithError(errDB).Error("failed to update snapshot run status")
+			}
+		}
+	}()
+
 	if err := s.PrepareForSnapshot(); err != nil {
 		if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error()); errDB != nil {
 			log.WithError(errDB).Error("failed to update snapshot run status")
@@ -407,14 +429,6 @@ func (s *SnapShotter) CreateSnapshot() error {
 		return err
 	}
 
-	if err := s.PostSnapshotStart(); err != nil {
-		if errDB := s.db.UpdateSnapshotRunStatus(run.ID, "failed", err.Error()); errDB != nil {
-			log.WithError(errDB).Error("failed to update snapshot run status")
-		}
-		log.WithError(err).Error("failed to restore service after snapshot")
-		return err
-	}
-
 	if s.cfg.Global.Snapshots.DryRun {
 		log.WithFields(log.Fields{
 			"run_id": run.ID,
@@ -424,7 +438,7 @@ func (s *SnapShotter) CreateSnapshot() error {
 	if err := s.db.UpdateSnapshotRunStatus(run.ID, "success", ""); err != nil {
 		log.WithError(err).Error("failed to update snapshot run status")
 	}
-	return err
+	return nil
 }
 
 func (s *SnapShotter) PrepareForSnapshot() error {
