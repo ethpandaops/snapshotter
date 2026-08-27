@@ -82,11 +82,55 @@ If you're happy with the version and the timestamp of the most recent snapshot, 
 curl -O https://snapshots.ethpandaops.io/sepolia/geth/$BLOCK_NUMBER/snapshot.tar.zst
 
 # Or... download and untar at the same time. Safes you disk space, so you don't have to store the full compressed file.
-curl -s -L https://snapshots.ethpandaops.io/sepolia/geth/$BLOCK_NUMBER/snapshot.tar.zst | tar -I zstd -xvf - -C $PATH_TO_YOUR_GETH_DATA_DIR
+# Note the trailing /geth: the geth archive is the datadir's inner geth/ directory, not its root.
+curl -s -L https://snapshots.ethpandaops.io/sepolia/geth/$BLOCK_NUMBER/snapshot.tar.zst | tar -I zstd -xvf - -C $PATH_TO_YOUR_GETH_DATA_DIR/geth
 
 # Or.. use a docker container with all the tools you need (curl, zstd, tar) and untar it on the fly
-docker run --rm -it -v $PATH_TO_YOUR_GETH_DATA_DIR:/data --entrypoint "/bin/sh" alpine -c "apk add --no-cache curl tar zstd && curl -s -L https://snapshots.ethpandaops.io/sepolia/geth/$BLOCK_NUMBER/snapshot.tar.zst | tar -I zstd -xvf - -C /data"
+docker run --rm -it -v $PATH_TO_YOUR_GETH_DATA_DIR/geth:/data --entrypoint "/bin/sh" alpine -c "apk add --no-cache curl tar zstd && curl -s -L https://snapshots.ethpandaops.io/sepolia/geth/$BLOCK_NUMBER/snapshot.tar.zst | tar -I zstd -xvf - -C /data"
 ```
+
+### Match the flags the snapshot was taken with
+
+A snapshot is a datadir produced by a node running specific flags, so the node you restore
+onto needs compatible ones. Pruning flags matter most: a pruned source omits data that an
+unpruned consumer will then try to rebuild in place.
+
+The flags vary per network, so read them off the snapshot rather than assuming:
+
+```sh
+curl -s https://snapshots.ethpandaops.io/mainnet/reth/$BLOCK_NUMBER/_snapshot_metadata.json | jq -r '.static.extra_args, .docker_image'
+```
+
+Where each client records what it was built with:
+
+- **geth** — reads the state scheme from the datadir, so you can omit `--state.scheme`;
+  passing one that conflicts fails with `incompatible state scheme`. Mainnet and sepolia
+  snapshots also use `--history.chain=postmerge`, so pre-merge history is absent.
+- **nethermind** — no sync or pruning flags; the extras are RPC modules and, off mainnet,
+  `--config=<network>`.
+- **besu** — the storage format is recorded in `DATABASE_METADATA.json` inside the archive
+  and validated on startup, so a mismatched `--data-storage-format` is rejected rather than
+  silently wrong.
+- **erigon** — the prune mode is recorded in the database and checked against `--prune.mode`
+  on startup.
+- **reth** — the only client whose config file ships inside the archive, and the only one
+  where nothing validates that config against the data. Keep the `reth.toml` at the archive
+  root: it holds both the prune config and `[static_files.blocks_per_file]`, the width of
+  every static file in the archive. Lose it and reth falls back to its defaults, tries to
+  build a segment the archive intentionally omits, and fails with `trying to append data to
+  transaction-senders as block #0 but expected block #N` — which stops the sync pipeline
+  while the node keeps peers and looks healthy. Start it with the whole `extra_args` string,
+  not a subset: any prune flag makes reth rewrite `[prune]` from the command line and save
+  the result back over `reth.toml`, so `--full` on its own re-prunes mainnet receipts to the
+  last 10064 blocks even though the archive carries them from the merge.
+
+geth and nethermind archive a subdirectory of the datadir (`geth/` and `nethermind_db/`)
+rather than its root, so extract them one level deeper — the paths in the commands above
+already account for this.
+
+Node identity is never included: `nodekey` (geth, erigon), `key` (besu) and
+`discovery-secret` (reth) are excluded from every archive, so a restored node generates its
+own.
 
 ## Configuration Options
 

@@ -88,6 +88,7 @@ type RCloneConfig struct {
 // .UploadPathPrefix is the prefix of the upload path ( e.g mainnet/geth)
 // .BlockNumber is the block number of the snapshot (e.g 123456)
 const DefaultRCloneCommandTemplate = `-ac "
+set -o pipefail &&
 apk add --no-cache tar zstd jq &&
 cd {{ .DataDir }} &&
 cat {{ .DataDir }}/_snapshot_metadata.json | jq . &&
