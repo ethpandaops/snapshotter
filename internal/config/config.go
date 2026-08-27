@@ -20,13 +20,14 @@ type Config struct {
 			UseAgent                 bool   `yaml:"use_agent"`
 		} `yaml:"ssh"`
 		Snapshots struct {
-			CheckIntervalSeconds int           `yaml:"check_interval_seconds"`
-			BlockInterval        int           `yaml:"block_interval"`
-			DryRun               bool          `yaml:"dry_run"`
-			RunOnce              bool          `yaml:"run_once"`
-			Cleanup              CleanupConfig `yaml:"cleanup"`
-			RClone               RCloneConfig  `yaml:"rclone"`
-			S3                   S3Config      `yaml:"s3"`
+			CheckIntervalSeconds int             `yaml:"check_interval_seconds"`
+			BlockInterval        int             `yaml:"block_interval"`
+			DryRun               bool            `yaml:"dry_run"`
+			RunOnce              bool            `yaml:"run_once"`
+			Cleanup              CleanupConfig   `yaml:"cleanup"`
+			RClone               RCloneConfig    `yaml:"rclone"`
+			Preimages            PreimagesConfig `yaml:"preimages"`
+			S3                   S3Config        `yaml:"s3"`
 		} `yaml:"snapshots"`
 		Database struct {
 			Path string `yaml:"path"`
@@ -73,6 +74,7 @@ type SSHTargetConfig struct {
 		Beacon    string `yaml:"beacon"`
 		Execution string `yaml:"execution"`
 	} `yaml:"endpoints"`
+	Preimages PreimagesTargetConfig `yaml:"preimages"`
 }
 
 type RCloneConfig struct {
@@ -88,6 +90,7 @@ type RCloneConfig struct {
 // .UploadPathPrefix is the prefix of the upload path ( e.g mainnet/geth)
 // .BlockNumber is the block number of the snapshot (e.g 123456)
 const DefaultRCloneCommandTemplate = `-ac "
+set -o pipefail &&
 apk add --no-cache tar zstd jq &&
 cd {{ .DataDir }} &&
 cat {{ .DataDir }}/_snapshot_metadata.json | jq . &&
@@ -95,12 +98,54 @@ tar -I 'zstd -T64' \\
 --exclude=./nodekey \\
 --exclude=./key \\
 --exclude=./discovery-secret \\
+--exclude=./_snapshot_preimages \\
 -cvf - . \\
 | rclone rcat --s3-chunk-size 300M mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }}/snapshot.tar.zst &&
 rclone copy {{ .DataDir }}/_snapshot_eth_getBlockByNumber.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
 rclone copy {{ .DataDir }}/_snapshot_web3_clientVersion.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
 rclone copy {{ .DataDir }}/_snapshot_metadata.json mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }} &&
 echo {{ .BlockNumber }} | rclone rcat mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/latest
+"`
+
+// PreimagesConfig holds the global command templates for the erigon
+// state-preimages export/upload step (see erigontech/erigon#22645).
+type PreimagesConfig struct {
+	ExportCmdTemplate string `yaml:"export_cmd_template"`
+	UploadCmdTemplate string `yaml:"upload_cmd_template"`
+}
+
+// PreimagesTargetConfig enables preimage export for a single SSH target.
+type PreimagesTargetConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Image    string `yaml:"image"`    // empty = auto-detect from the execution container
+	Required bool   `yaml:"required"` // true = preimage failure fails the target/run
+}
+
+// PreimagesOutDirName is the scratch directory created inside the target's
+// datadir while exporting preimages. Must match the --exclude in
+// DefaultRCloneCommandTemplate.
+const PreimagesOutDirName = "_snapshot_preimages"
+
+// DefaultPreimagesExportCmdTemplate runs erigon's `snapshots export-preimages`
+// as a plain host command (single shell layer, $(...) expands on the host).
+// The container user is bound to the datadir owner; a failed stat aborts
+// instead of silently running as the image default user.
+// Vars: .Image .DataDir .OutDir
+const DefaultPreimagesExportCmdTemplate = `u="$(stat -c '%u:%g' {{ .DataDir }})" && docker run --rm --user "$u" -v {{ .DataDir }}:{{ .DataDir }} {{ .Image }} snapshots export-preimages --datadir {{ .DataDir }} --out {{ .OutDir }}`
+
+// DefaultPreimagesUploadCmdTemplate publishes preimages.tar.zst via the rclone
+// container. meta is the FIRST tar member (streamable without framed.bin), a
+// failed pipe deletes the partial object, and the per-client `latest` stays
+// owned by the snapshot template above.
+// Editing rule inside -ac "...": write $ as \$ and " as \"; no backticks.
+// Vars: .OutDir .BucketName .UploadPathPrefix .BlockNumber
+const DefaultPreimagesUploadCmdTemplate = `-ac "
+set -o pipefail &&
+apk add --no-cache tar zstd &&
+cd {{ .OutDir }} &&
+tar -I 'zstd -T64' -cf - preimages.meta.json framed.bin \\
+| rclone rcat --s3-chunk-size 300M mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }}/preimages.tar.zst \\
+|| ( rclone deletefile mys3:/{{ .BucketName }}/{{ .UploadPathPrefix }}/{{ .BlockNumber }}/preimages.tar.zst; exit 1 )
 "`
 
 // GetDefaultRCloneConfig returns an RCloneConfig with sensible defaults
@@ -141,6 +186,14 @@ func ReadFromFile(path string) (*Config, error) {
 
 	if config.Global.Snapshots.RClone.Entrypoint == "" {
 		config.Global.Snapshots.RClone.Entrypoint = "/bin/sh"
+	}
+
+	if config.Global.Snapshots.Preimages.ExportCmdTemplate == "" {
+		config.Global.Snapshots.Preimages.ExportCmdTemplate = DefaultPreimagesExportCmdTemplate
+	}
+
+	if config.Global.Snapshots.Preimages.UploadCmdTemplate == "" {
+		config.Global.Snapshots.Preimages.UploadCmdTemplate = DefaultPreimagesUploadCmdTemplate
 	}
 
 	// Initialize RClone environment variables from the S3 configuration when available
@@ -200,6 +253,7 @@ func ReadFromFile(path string) (*Config, error) {
 	// Expand environment variables in SSH target paths
 	for i := range config.Targets.SSH {
 		config.Targets.SSH[i].DataDir = os.ExpandEnv(config.Targets.SSH[i].DataDir)
+		config.Targets.SSH[i].Preimages.Image = os.ExpandEnv(config.Targets.SSH[i].Preimages.Image)
 	}
 
 	return config, nil
