@@ -1,3 +1,31 @@
+# Deploy - Docker
+#
+# Builds and publishes the multi-arch snapshotter image:
+#
+#   Dockerfile → ghcr.io/<owner>/snapshotter
+#
+# Native amd64 and arm64 builds run in parallel on per-arch runners, get pushed
+# under per-arch tags, then `docker buildx imagetools create` stitches them into
+# multi-arch manifests. This replaces the QEMU emulated arm64 build, which is
+# slow enough that arm64 was dropped from the platform list.
+#
+# Tag strategy:
+#   push to master    → master, master-latest, master-<sha>
+#   tag v*.*.*        → <version>, latest, <version>-<sha>
+#   workflow_dispatch → pr-<n>, pr-<n>-<sha>
+# The per-arch build tags (…-amd64 / …-arm64) are an implementation detail.
+# Consumers pull the multi-arch manifests above.
+#
+# PR builds are manual (`workflow_dispatch`) by design, not label- or
+# `pull_request`-triggered. A `pull_request` run from a fork gets a read-only
+# GITHUB_TOKEN and cannot push to GHCR at all. The alternative —
+# `pull_request_target` — hands a packages:write token to a workflow that
+# builds a fork-authored Dockerfile on every label event. Dispatch keeps the
+# same code-execution exposure (a maintainer still builds fork code) but makes
+# it a deliberate, per-commit act.
+# `pr` is a PR number. A fork PR's head is fetchable from this repo under
+# refs/pull/*, so fork PRs work without a fork remote.
+
 name: Deploy - Docker
 
 on:
@@ -6,25 +34,257 @@ on:
       - master
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR number to build (e.g. 42). Builds that PR''s head commit and pushes pr-<n> tags.'
+        required: true
+        type: string
+
+# Supersede an in-flight build only when the same PR is re-dispatched. A
+# re-dispatch means "redo it", so the workflow cancels the old run.
+#
+# Pushes to master and version tags are never cancelled. A release build that
+# loses a race would leave half-published manifests behind.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.pr && format('pr-{0}', inputs.pr) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 jobs:
-  build-and-push-image:
+  meta:
+    name: Compute tags and build info
     runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
+      sha_short: ${{ steps.vars.outputs.sha_short }}
+      tag_prefix: ${{ steps.vars.outputs.tag_prefix }}
+      additional_tags: ${{ steps.vars.outputs.additional_tags }}
+      version: ${{ steps.vars.outputs.version }}
+      revision: ${{ steps.vars.outputs.revision }}
+    steps:
+      # Resolve the PR head to a concrete sha ONCE, here, and hand it to every
+      # downstream job. If the contributor force-pushes mid-run, the later jobs
+      # still build the commit this job stamped. Otherwise the multi-arch
+      # manifest could silently split across two different commits.
+      - name: Resolve commit to build
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          # Empty for push events, which leaves every checkout below on its
+          # default ref. This is deliberate: actions/checkout turns a 40-char
+          # `ref` into a bare `git fetch origin <sha>`, which brings no tag
+          # refs, and `git describe --tags` in the next step would then
+          # degrade a release version stamp from v1.2.3 to a bare sha.
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+            echo "checkout_ref=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
+            echo "::error::pr input must be a number, got '$PR'"
+            exit 1
+          fi
+          HEAD_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha)
+          echo "Building PR #${PR} at ${HEAD_SHA}"
+          echo "checkout_ref=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.checkout_ref }}
+          fetch-depth: 0
+
+      - id: vars
+        env:
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          {
+            echo "sha_short=$(git rev-parse --short HEAD)"
+            # Values for the org.opencontainers.image.* labels below.
+            echo "version=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
+            echo "revision=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            # There is no moving-"latest" analogue for PRs: pr-<n> already is
+            # the moving pointer, and pr-<n>-<sha> the pinned one. Nothing a
+            # dispatch produces may collide with master/latest/<version>.
+            TAG_PREFIX="pr-${PR}"
+            ADDITIONAL_TAGS="[\"pr-${PR}\"]"
+          elif [[ "$GITHUB_REF" == refs/tags/v*.*.* ]]; then
+            # Both the v-prefixed and bare forms. docker/metadata-action's
+            # `type=semver,pattern={{version}}` published the bare `1.2.3`
+            # before, so keep publishing it for existing consumers.
+            VERSION_TAG="${GITHUB_REF#refs/tags/}"
+            TAG_PREFIX="$VERSION_TAG"
+            ADDITIONAL_TAGS="[\"$VERSION_TAG\",\"${VERSION_TAG#v}\",\"latest\"]"
+          else
+            TAG_PREFIX="master"
+            ADDITIONAL_TAGS="[\"master\",\"master-latest\"]"
+          fi
+          {
+            echo "tag_prefix=$TAG_PREFIX"
+            echo "additional_tags=$ADDITIONAL_TAGS"
+          } >> "$GITHUB_OUTPUT"
+
+  build_amd64:
+    name: Build amd64 image
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
-
+    env:
+      GHCR_REPO: ghcr.io/${{ github.repository }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+          fetch-depth: 0
 
-      - name: Deploy docker images
-        uses: ./.github/actions/docker-deploy
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
-          registry_username: ${{ github.actor }}
-          registry_password: ${{ secrets.GITHUB_TOKEN }}
-          image_name: ${{ github.repository }}
-          push: true
-          platforms: linux/amd64
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build amd64 docker image
+        env:
+          PREFIX: ${{ needs.meta.outputs.tag_prefix }}
+          SHA: ${{ needs.meta.outputs.sha_short }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          REVISION: ${{ needs.meta.outputs.revision }}
+        run: |
+          docker build . --file Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${REVISION}" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --tag "${GHCR_REPO}:${PREFIX}-amd64" \
+            --tag "${GHCR_REPO}:${PREFIX}-${SHA}-amd64" \
+            --platform=linux/amd64
+
+      - name: Push amd64 docker images
+        env:
+          PREFIX: ${{ needs.meta.outputs.tag_prefix }}
+          SHA: ${{ needs.meta.outputs.sha_short }}
+        run: |
+          docker push "${GHCR_REPO}:${PREFIX}-amd64"
+          docker push "${GHCR_REPO}:${PREFIX}-${SHA}-amd64"
+
+  build_arm64:
+    name: Build arm64 image
+    needs: meta
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GHCR_REPO: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build arm64 docker image
+        env:
+          PREFIX: ${{ needs.meta.outputs.tag_prefix }}
+          SHA: ${{ needs.meta.outputs.sha_short }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          REVISION: ${{ needs.meta.outputs.revision }}
+        run: |
+          docker build . --file Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${REVISION}" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --tag "${GHCR_REPO}:${PREFIX}-arm64" \
+            --tag "${GHCR_REPO}:${PREFIX}-${SHA}-arm64" \
+            --platform=linux/arm64
+
+      - name: Push arm64 docker images
+        env:
+          PREFIX: ${{ needs.meta.outputs.tag_prefix }}
+          SHA: ${{ needs.meta.outputs.sha_short }}
+        run: |
+          docker push "${GHCR_REPO}:${PREFIX}-arm64"
+          docker push "${GHCR_REPO}:${PREFIX}-${SHA}-arm64"
+
+  manifest_sha:
+    name: Multi-arch sha manifest
+    needs: [meta, build_amd64, build_arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GHCR_REPO: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch sha manifest
+        env:
+          PREFIX: ${{ needs.meta.outputs.tag_prefix }}
+          SHA: ${{ needs.meta.outputs.sha_short }}
+        run: |
+          docker buildx imagetools create -t "${GHCR_REPO}:${PREFIX}-${SHA}" \
+            "${GHCR_REPO}:${PREFIX}-${SHA}-amd64" \
+            "${GHCR_REPO}:${PREFIX}-${SHA}-arm64"
+
+  manifest_extra:
+    name: Multi-arch additional manifest (${{ matrix.tag }})
+    needs: [meta, build_amd64, build_arm64]
+    if: ${{ needs.meta.outputs.additional_tags != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        tag: ${{ fromJSON(needs.meta.outputs.additional_tags) }}
+    env:
+      GHCR_REPO: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest ${{ matrix.tag }}
+        env:
+          PREFIX: ${{ needs.meta.outputs.tag_prefix }}
+          SHA: ${{ needs.meta.outputs.sha_short }}
+          TAG: ${{ matrix.tag }}
+        run: |
+          docker buildx imagetools create -t "${GHCR_REPO}:${TAG}" \
+            "${GHCR_REPO}:${PREFIX}-${SHA}-amd64" \
+            "${GHCR_REPO}:${PREFIX}-${SHA}-arm64"
