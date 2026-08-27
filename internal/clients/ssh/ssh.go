@@ -2,13 +2,16 @@ package ssh
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
@@ -20,9 +23,10 @@ import (
 )
 
 type SSHClient struct {
-	Config       *ssh.ClientConfig
-	TargetConfig *config.SSHTargetConfig
-	RCloneConfig *config.RCloneConfig
+	Config          *ssh.ClientConfig
+	TargetConfig    *config.SSHTargetConfig
+	RCloneConfig    *config.RCloneConfig
+	PreimagesConfig *config.PreimagesConfig
 }
 
 // SnapshotMetadata represents metadata about a snapshot
@@ -31,7 +35,7 @@ type SnapshotMetadata struct {
 	Static      map[string]string `json:"static,omitempty"`
 }
 
-func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string, ignoreHostKeyCheck bool, useAgent bool, rclone *config.RCloneConfig, target *config.SSHTargetConfig) *SSHClient {
+func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string, ignoreHostKeyCheck bool, useAgent bool, rclone *config.RCloneConfig, preimages *config.PreimagesConfig, target *config.SSHTargetConfig) *SSHClient {
 
 	var hostkeyCallback ssh.HostKeyCallback
 	hostkeyCallback, err := knownhosts.New(knowHostsPath)
@@ -91,9 +95,10 @@ func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string
 	}
 
 	return &SSHClient{
-		Config:       config,
-		TargetConfig: target,
-		RCloneConfig: rclone,
+		Config:          config,
+		TargetConfig:    target,
+		RCloneConfig:    rclone,
+		PreimagesConfig: preimages,
 	}
 }
 
@@ -342,8 +347,59 @@ func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPrefix string, bl
 		return err
 	}
 
+	// Get command template, using default if not specified
+	cmdTemplate := client.RCloneConfig.CommandTemplate
+	if cmdTemplate == "" {
+		// If we don't have the template directly, use the default from config package
+		// This fallback should rarely happen since we set defaults in config.ReadFromFile
+		log.Debug("RClone command template not specified, using default from config package")
+		cmdTemplate = config.GetDefaultRCloneConfig().CommandTemplate
+	}
+
+	cmd, err := client.buildRCloneDockerCmd(srcDir, cmdTemplate, rcloneCmdVars{
+		DataDir:          srcDir,
+		UploadPathPrefix: uploadPrefix,
+		BucketName:       client.resolveBucketName(),
+		BlockNumber:      blockNumber,
+	})
+	if err != nil {
+		return err
+	}
+
+	out, err := client.RunCommand(cmd)
+	if err != nil {
+		log.WithError(err).WithField("output", out).Error("failed to rclone sync")
+		return err
+	}
+
+	return nil
+}
+
+// rcloneCmdVars are the variables exposed to rclone command templates.
+// OutDir is only set for the preimages upload template.
+type rcloneCmdVars struct {
+	DataDir          string
+	OutDir           string
+	UploadPathPrefix string
+	BucketName       string
+	BlockNumber      uint64
+}
+
+func (client *SSHClient) resolveBucketName() string {
+	if client.RCloneConfig.Env != nil {
+		if val, exists := client.RCloneConfig.Env["RCLONE_CONFIG_MYS3_BUCKET_NAME"]; exists && val != "" {
+			return val
+		}
+	}
+	log.Warn("Bucket name not found in RClone config environment variables, using default")
+	return "ethpandaops-ethereum-node-snapshots"
+}
+
+// buildRCloneDockerCmd assembles the `docker run ... rclone/rclone:<version> <payload>`
+// command, rendering cmdTemplate with vars; env keys are sorted for determinism.
+func (client *SSHClient) buildRCloneDockerCmd(mountDir, cmdTemplate string, vars rcloneCmdVars) (string, error) {
 	cmd := "docker run --rm" +
-		" -v " + srcDir + ":" + srcDir
+		" -v " + mountDir + ":" + mountDir
 
 	// Use default entrypoint if not specified
 	entrypoint := client.RCloneConfig.Entrypoint
@@ -354,58 +410,26 @@ func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPrefix string, bl
 
 	// Add environment variables
 	if client.RCloneConfig.Env != nil {
-		for k, v := range client.RCloneConfig.Env {
-			cmd += fmt.Sprintf(" -e %s=%s", k, v)
+		keys := make([]string, 0, len(client.RCloneConfig.Env))
+		for k := range client.RCloneConfig.Env {
+			keys = append(keys, k)
 		}
-	}
-
-	// Get command template, using default if not specified
-	cmdTemplate := client.RCloneConfig.CommandTemplate
-	if cmdTemplate == "" {
-		// If we don't have the template directly, use the default from config package
-		// This fallback should rarely happen since we set defaults in config.ReadFromFile
-		log.Debug("RClone command template not specified, using default from config package")
-		cmdTemplate = config.GetDefaultRCloneConfig().CommandTemplate
+		sort.Strings(keys)
+		for _, k := range keys {
+			cmd += fmt.Sprintf(" -e %s=%s", k, client.RCloneConfig.Env[k])
+		}
 	}
 
 	tmpl, err := template.New("cmd").Parse(cmdTemplate)
 	if err != nil {
 		log.WithError(err).Error("failed to parse rclone cmd template")
-		return err
-	}
-
-	// Get bucket name from RClone config environment variables
-	// This is set in config.ReadFromFile from the s3 configuration
-	bucketName := ""
-	if client.RCloneConfig.Env != nil {
-		if val, exists := client.RCloneConfig.Env["RCLONE_CONFIG_MYS3_BUCKET_NAME"]; exists && val != "" {
-			bucketName = val
-		}
-	}
-
-	// If not found in rclone env, use the default
-	if bucketName == "" {
-		log.Warn("Bucket name not found in RClone config environment variables, using default")
-		// Use a default if no environment variable is set
-		bucketName = "ethpandaops-ethereum-node-snapshots"
-	}
-
-	cmdVars := struct {
-		DataDir          string
-		UploadPathPrefix string
-		BucketName       string
-		BlockNumber      uint64
-	}{
-		DataDir:          srcDir,
-		UploadPathPrefix: uploadPrefix,
-		BucketName:       bucketName,
-		BlockNumber:      blockNumber,
+		return "", err
 	}
 
 	var rcloneCmd bytes.Buffer
-	if err := tmpl.Execute(&rcloneCmd, cmdVars); err != nil {
+	if err := tmpl.Execute(&rcloneCmd, vars); err != nil {
 		log.WithError(err).Error("failed to execute rclone cmd template")
-		return err
+		return "", err
 	}
 
 	// Use default version if not specified
@@ -414,12 +438,229 @@ func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPrefix string, bl
 		version = config.GetDefaultRCloneConfig().Version
 	}
 
-	cmd += " rclone/rclone:" + version + " " + rcloneCmd.String()
+	return cmd + " rclone/rclone:" + version + " " + rcloneCmd.String(), nil
+}
+
+// preimagesOutDir is inside the datadir so the existing bind mounts cover it;
+// the snapshot tar template excludes it.
+func preimagesOutDir(dataDir string) string {
+	return dataDir + "/" + config.PreimagesOutDirName
+}
+
+func (client *SSHClient) preimagesExportTemplate() string {
+	if client.PreimagesConfig != nil && client.PreimagesConfig.ExportCmdTemplate != "" {
+		return client.PreimagesConfig.ExportCmdTemplate
+	}
+	return config.DefaultPreimagesExportCmdTemplate
+}
+
+func (client *SSHClient) preimagesUploadTemplate() string {
+	if client.PreimagesConfig != nil && client.PreimagesConfig.UploadCmdTemplate != "" {
+		return client.PreimagesConfig.UploadCmdTemplate
+	}
+	return config.DefaultPreimagesUploadCmdTemplate
+}
+
+func (client *SSHClient) renderPreimagesExportCmd(image, dataDir string) (string, error) {
+	tmpl, err := template.New("preimages-export").Parse(client.preimagesExportTemplate())
+	if err != nil {
+		log.WithError(err).Error("failed to parse preimages export cmd template")
+		return "", err
+	}
+
+	cmdVars := struct {
+		Image   string
+		DataDir string
+		OutDir  string
+	}{
+		Image:   image,
+		DataDir: dataDir,
+		OutDir:  preimagesOutDir(dataDir),
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, cmdVars); err != nil {
+		log.WithError(err).Error("failed to execute preimages export cmd template")
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// PullDockerImage pulls an image on the target host.
+func (client *SSHClient) PullDockerImage(image string) error {
+	out, err := client.RunCommand(fmt.Sprintf(`docker pull "%s"`, image))
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"host":   client.TargetConfig.Alias,
+			"image":  image,
+			"output": out,
+		}).Warn("failed to pull docker image")
+		return err
+	}
+	return nil
+}
+
+// ResolvePreimagesImage returns the image to run the preimage export with:
+// the pinned image from the target config when set, otherwise the image of
+// the execution container (docker inspect works on stopped containers, and
+// reusing the EL's own image guarantees binary/datadir version compatibility).
+func (client *SSHClient) ResolvePreimagesImage() (string, error) {
+	if image := client.TargetConfig.Preimages.Image; image != "" {
+		return image, nil
+	}
+	if client.TargetConfig.DockerContainers.Execution == "" {
+		return "", fmt.Errorf("preimages: no image pinned and no execution container configured for %s", client.TargetConfig.Alias)
+	}
+	return client.GetDockerContainerImage(client.TargetConfig.DockerContainers.Execution)
+}
+
+// RunPreimagesExport runs `erigon snapshots export-preimages` in a throwaway
+// container. The EL must be stopped so the exported state matches the snapshot.
+func (client *SSHClient) RunPreimagesExport(image, dataDir string) error {
+	cmd, err := client.renderPreimagesExportCmd(image, dataDir)
+	if err != nil {
+		return err
+	}
 	out, err := client.RunCommand(cmd)
 	if err != nil {
-		log.WithError(err).WithField("output", out).Error("failed to rclone sync")
+		log.WithError(err).WithFields(log.Fields{
+			"host":   client.TargetConfig.Alias,
+			"image":  image,
+			"output": out,
+		}).Error("preimages export failed")
+		return fmt.Errorf("preimages export failed: %w", err)
+	}
+	return nil
+}
+
+// isHexRoot reports whether s is a 0x-prefixed 32-byte hex string.
+func isHexRoot(s string) bool {
+	if len(s) != 66 || !strings.HasPrefix(s, "0x") {
+		return false
+	}
+	_, err := hex.DecodeString(s[2:])
+	return err == nil
+}
+
+// validateStateRootsOutput expects exactly two well-formed 32-byte hex roots
+// in the output (preimages meta first, block dump second) and requires them to
+// match. Roots are selected by shape, so sudo/PAM noise anywhere in the merged
+// stdout+stderr is ignored.
+func validateStateRootsOutput(out string) error {
+	var roots []string
+	for _, line := range strings.Split(out, "\n") {
+		if trimmed := strings.TrimSpace(line); isHexRoot(trimmed) {
+			roots = append(roots, trimmed)
+		}
+	}
+	if len(roots) != 2 {
+		return fmt.Errorf("expected exactly 2 state roots in verification output, got %d: %q", len(roots), out)
+	}
+	if !strings.EqualFold(roots[0], roots[1]) {
+		return fmt.Errorf("state root mismatch: preimages meta has %s but snapshot block dump has %s", roots[0], roots[1])
+	}
+	return nil
+}
+
+// verifyPreimagesStateRoot requires the state root in preimages.meta.json to
+// equal the one in the dumped _snapshot_eth_getBlockByNumber.json, catching
+// commitment lag and wrong-datadir exports before upload. Block numbers are
+// deliberately not compared: the S3 dir name can lag the frozen head.
+func (client *SSHClient) verifyPreimagesStateRoot(dataDir string) error {
+	metaPath := preimagesOutDir(dataDir) + "/preimages.meta.json"
+	dumpPath := dataDir + "/_snapshot_eth_getBlockByNumber.json"
+	cmd := fmt.Sprintf(`sudo cat "%s" | jq -r .stateRoot && sudo cat "%s" | jq -r .result.stateRoot`, metaPath, dumpPath)
+	out, err := client.RunCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("preimages state root verification failed: %w (output: %s)", err, out)
+	}
+	if err := validateStateRootsOutput(out); err != nil {
+		return fmt.Errorf("preimages state root verification failed: %w", err)
+	}
+	return nil
+}
+
+// UploadPreimages uploads the export output as preimages.tar.zst to the block
+// directory via the rclone container.
+func (client *SSHClient) UploadPreimages(dataDir, uploadPrefix string, blockNumber uint64) error {
+	cmd, err := client.buildRCloneDockerCmd(dataDir, client.preimagesUploadTemplate(), rcloneCmdVars{
+		DataDir:          dataDir,
+		OutDir:           preimagesOutDir(dataDir),
+		UploadPathPrefix: uploadPrefix,
+		BucketName:       client.resolveBucketName(),
+		BlockNumber:      blockNumber,
+	})
+	if err != nil {
+		return err
+	}
+	out, err := client.RunCommand(cmd)
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"host":   client.TargetConfig.Alias,
+			"output": out,
+		}).Error("preimages upload failed")
+		return fmt.Errorf("preimages upload failed: %w", err)
+	}
+	return nil
+}
+
+// CleanupPreimages removes the preimages scratch directory from the datadir.
+func (client *SSHClient) CleanupPreimages(dataDir string) error {
+	if dataDir == "" || dataDir == "/" {
+		return fmt.Errorf("refusing to clean up preimages scratch dir for unsafe data dir %q", dataDir)
+	}
+	out, err := client.RunCommand(fmt.Sprintf(`sudo rm -rf "%s"`, preimagesOutDir(dataDir)))
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"host":   client.TargetConfig.Alias,
+			"output": out,
+		}).Warn("failed to clean up preimages scratch dir")
+		return err
+	}
+	return nil
+}
+
+// ExportAndUploadPreimages exports, verifies the state root, then uploads.
+// Scratch-dir cleanup always runs afterwards but never fails the flow.
+func (client *SSHClient) ExportAndUploadPreimages(dataDir, uploadPrefix string, blockNumber uint64) error {
+	if dataDir == "" || dataDir == "/" {
+		return fmt.Errorf("preimages: refusing to run against unsafe data dir %q", dataDir)
+	}
+
+	image, err := client.ResolvePreimagesImage()
+	if err != nil {
 		return err
 	}
 
+	// Warn-only: export-preimages rewrites its outputs (erigontech/erigon#22645).
+	if err := client.CleanupPreimages(dataDir); err != nil {
+		log.WithError(err).Warnf("failed to pre-clean preimages scratch dir on %s (continuing)", client.TargetConfig.Alias)
+	}
+	defer func() {
+		if err := client.CleanupPreimages(dataDir); err != nil {
+			log.WithError(err).Warnf("failed to clean up preimages scratch dir on %s (snapshot tar excludes it)", client.TargetConfig.Alias)
+		}
+	}()
+
+	t1 := time.Now()
+	log.WithFields(log.Fields{
+		"host":  client.TargetConfig.Alias,
+		"image": image,
+	}).Info("exporting state preimages")
+
+	if err := client.RunPreimagesExport(image, dataDir); err != nil {
+		return err
+	}
+	if err := client.verifyPreimagesStateRoot(dataDir); err != nil {
+		return err
+	}
+	if err := client.UploadPreimages(dataDir, uploadPrefix, blockNumber); err != nil {
+		return err
+	}
+
+	log.WithFields(log.Fields{
+		"host": client.TargetConfig.Alias,
+		"took": time.Since(t1),
+	}).Info("exported and uploaded state preimages")
 	return nil
 }
