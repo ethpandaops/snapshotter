@@ -27,8 +27,9 @@ type SSHClient struct {
 
 // SnapshotMetadata represents metadata about a snapshot
 type SnapshotMetadata struct {
-	DockerImage string            `json:"docker_image,omitempty"`
-	Static      map[string]string `json:"static,omitempty"`
+	DockerImage   string            `json:"docker_image,omitempty"`
+	DataSizeBytes uint64            `json:"data_size_bytes,omitempty"`
+	Static        map[string]string `json:"static,omitempty"`
 }
 
 func NewSSHClient(privateKeyPath, privateKeyPassphrasePath, knowHostsPath string, ignoreHostKeyCheck bool, useAgent bool, rclone *config.RCloneConfig, target *config.SSHTargetConfig) *SSHClient {
@@ -310,6 +311,19 @@ func (client *SSHClient) GetDockerContainerImage(containerName string) (string, 
 	return strings.TrimSpace(out), nil
 }
 
+// GetDirSizeBytes returns the raw disk usage of a directory in bytes
+func (client *SSHClient) GetDirSizeBytes(dir string) (uint64, error) {
+	out, err := client.RunCommand(fmt.Sprintf(`sudo du -sb "%s" | cut -f1`, dir))
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"dir":    dir,
+			"output": out,
+		}).Warn("failed to get directory size")
+		return 0, err
+	}
+	return strconv.ParseUint(strings.TrimSpace(out), 10, 64)
+}
+
 func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPrefix string, blockNumber uint64) error {
 	// Get Docker image information for metadata
 	metadata := SnapshotMetadata{
@@ -324,6 +338,14 @@ func (client *SSHClient) RCloneSyncLocalToRemote(srcDir, uploadPrefix string, bl
 		} else {
 			log.WithError(err).Warn("failed to get execution container image for metadata")
 		}
+	}
+
+	// Get the raw (uncompressed) size of the data directory
+	dataSize, err := client.GetDirSizeBytes(srcDir)
+	if err == nil {
+		metadata.DataSizeBytes = dataSize
+	} else {
+		log.WithError(err).Warn("failed to get data directory size for metadata")
 	}
 
 	// Create metadata JSON file
