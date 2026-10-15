@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -121,5 +122,85 @@ targets:
 	if cfg.Global.Snapshots.RClone.Env["RCLONE_CONFIG_MYS3_BUCKET_NAME"] != "test-bucket" {
 		t.Errorf("S3 bucket not propagated to RClone env correctly. Got %s, expected test-bucket",
 			cfg.Global.Snapshots.RClone.Env["RCLONE_CONFIG_MYS3_BUCKET_NAME"])
+	}
+}
+
+func writeTempConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create temp config file: %v", err)
+	}
+	return path
+}
+
+func TestPreimagesDefaults(t *testing.T) {
+	cfg, err := ReadFromFile(writeTempConfig(t, `
+global:
+  chainID: "0x88bb0"
+  snapshots:
+    block_interval: 10
+targets:
+  ssh:
+    - alias: "erigon"
+      host: "127.0.0.1"
+      user: "test"
+      port: 22
+      data_dir: /data/erigon
+      upload_prefix: test/erigon
+`))
+	if err != nil {
+		t.Fatalf("Failed to read config: %v", err)
+	}
+
+	if cfg.Global.Snapshots.Preimages.ExportCmdTemplate != DefaultPreimagesExportCmdTemplate {
+		t.Errorf("Preimages export cmd template default not applied. Got %q", cfg.Global.Snapshots.Preimages.ExportCmdTemplate)
+	}
+	if cfg.Global.Snapshots.Preimages.UploadCmdTemplate != DefaultPreimagesUploadCmdTemplate {
+		t.Errorf("Preimages upload cmd template default not applied. Got %q", cfg.Global.Snapshots.Preimages.UploadCmdTemplate)
+	}
+
+	target := cfg.Targets.SSH[0].Preimages
+	if target.Enabled || target.Image != "" || target.Required {
+		t.Errorf("Target preimages config should be zero-valued when unset. Got %+v", target)
+	}
+}
+
+func TestPreimagesTargetParsingAndEnvExpansion(t *testing.T) {
+	if err := os.Setenv("TEST_ERIGON_IMAGE", "ethpandaops/erigon:test-tag"); err != nil {
+		t.Fatalf("Failed to set TEST_ERIGON_IMAGE: %v", err)
+	}
+
+	cfg, err := ReadFromFile(writeTempConfig(t, `
+global:
+  chainID: "0x88bb0"
+  snapshots:
+    block_interval: 10
+targets:
+  ssh:
+    - alias: "erigon"
+      host: "127.0.0.1"
+      user: "test"
+      port: 22
+      data_dir: /data/erigon
+      upload_prefix: test/erigon
+      preimages:
+        enabled: true
+        image: "$TEST_ERIGON_IMAGE"
+        required: true
+`))
+	if err != nil {
+		t.Fatalf("Failed to read config: %v", err)
+	}
+
+	target := cfg.Targets.SSH[0].Preimages
+	if !target.Enabled {
+		t.Error("Target preimages should be enabled")
+	}
+	if target.Image != "ethpandaops/erigon:test-tag" {
+		t.Errorf("Target preimages image not expanded correctly. Got %q, expected ethpandaops/erigon:test-tag", target.Image)
+	}
+	if !target.Required {
+		t.Error("Target preimages should be required")
 	}
 }

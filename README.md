@@ -42,6 +42,7 @@ Snapshot | `https://snapshots.ethpandaops.io/{{ network_name }}/{{ client_name }
 Block info | `https://snapshots.ethpandaops.io/{{ network_name }}/{{ client_name }}/{{ block_number }}/_snapshot_eth_getBlockByNumber.json`
 Client info | `https://snapshots.ethpandaops.io/{{ network_name }}/{{ client_name }}/{{ block_number }}/_snapshot_web3_clientVersion.json`
 Metadata | `https://snapshots.ethpandaops.io/{{ network_name }}/{{ client_name }}/{{ block_number }}/_snapshot_metadata.json`
+State preimages (erigon only) | `https://snapshots.ethpandaops.io/{{ network_name }}/erigon/{{ block_number }}/preimages.tar.zst`
 
 Possible values:
 - `network_name` -> `holesky`, `hoodi`, `sepolia`, `mainnet`.
@@ -87,6 +88,43 @@ curl -s -L https://snapshots.ethpandaops.io/sepolia/geth/$BLOCK_NUMBER/snapshot.
 # Or.. use a docker container with all the tools you need (curl, zstd, tar) and untar it on the fly
 docker run --rm -it -v $PATH_TO_YOUR_GETH_DATA_DIR:/data --entrypoint "/bin/sh" alpine -c "apk add --no-cache curl tar zstd && curl -s -L https://snapshots.ethpandaops.io/sepolia/geth/$BLOCK_NUMBER/snapshot.tar.zst | tar -I zstd -xvf - -C /data"
 ```
+
+### State preimages (erigon)
+
+For erigon targets, the snapshotter can additionally publish a **state preimages** artifact next to the snapshot. It is produced with erigon's `snapshots export-preimages` command ([erigontech/erigon#22645](https://github.com/erigontech/erigon/pull/22645)) while the node is stopped, so it corresponds to the exact same state as `snapshot.tar.zst`. This is the input consumed by state-conversion tooling.
+
+`preimages.tar.zst` contains two files:
+
+1. `preimages.meta.json` (first member, so it can be streamed without downloading the rest): `{ "block", "stateRoot", "accounts", "storage" }`
+2. `framed.bin`: the full latest state as length-prefixed frames, one per account:
+
+```
+address[20 bytes] | slotCount[4 bytes, big-endian] | slotKey[32 bytes] * slotCount
+```
+
+Records are sorted ascending by address, and each account's storage slot keys are sorted ascending. The total size of `framed.bin` is exactly `accounts*24 + storage*32` bytes.
+
+```sh
+# Peek at the metadata without downloading framed.bin
+curl -s https://snapshots.ethpandaops.io/sepolia/erigon/$BLOCK_NUMBER/preimages.tar.zst | zstd -d | tar -xO --occurrence=1 preimages.meta.json
+
+# Download and extract
+curl -s -L https://snapshots.ethpandaops.io/sepolia/erigon/$BLOCK_NUMBER/preimages.tar.zst | tar -I zstd -xvf - -C $YOUR_OUTPUT_DIR
+```
+
+To enable it, add a `preimages` block to an erigon target (see [config.example.yaml](config.example.yaml)):
+
+```yaml
+      preimages:
+        enabled: true
+```
+
+Notes for operators:
+
+- The export runs `docker run <erigon image> snapshots export-preimages` on the node during the stopped-EL window and needs roughly `accounts*24 + storage*32` bytes of free space in the datadir volume. It extends the window for **all** targets of the run, since containers are only restarted after every upload finishes.
+- The command only exists in erigon builds from `main` after 2026-07-22 (no stable release ships it yet).
+- By default failures are best-effort: the snapshot still publishes and the block directory simply has no `preimages.tar.zst` (HTTP 404). With `required: true`, a preimage failure fails the whole run and leaves the EL containers stopped until manually restarted.
+- If you override `global.snapshots.rclone.cmd_template` with a custom template, add `--exclude=./_snapshot_preimages` to its tar invocation so a leftover export can never end up inside `snapshot.tar.zst`.
 
 ## Configuration Options
 
