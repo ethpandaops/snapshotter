@@ -30,6 +30,10 @@ global:
         RCLONE_CONFIG_MYS3_TYPE: s3
         RCLONE_CONFIG_MYS3_PROVIDER: DigitalOcean
         RCLONE_CONFIG_MYS3_ACL: public-read
+    # Optional: override the erigon preimages export/upload command templates (defaults built in).
+    # preimages:
+    #   export_cmd_template: ...
+    #   upload_cmd_template: ...
 targets:
   ssh:
     - alias: "geth"
@@ -58,3 +62,21 @@ targets:
       endpoints:
         beacon: http://localhost:5052
         execution: http://localhost:8545
+    - alias: "erigon"
+      host: "1.2.3.6"
+      user: "devops"
+      port: 22
+      data_dir: /data/hoodi/erigon/erigon
+      upload_prefix: hoodi/erigon
+      docker_containers:
+        engine_snooper: snooper-engine
+        execution: execution
+        beacon: beacon
+      endpoints:
+        beacon: http://localhost:5052
+        execution: http://localhost:8545
+      # Publish {upload_prefix}/{block}/preimages.tar.zst (see README: State preimages).
+      preimages:
+        enabled: true
+        # image: ethpandaops/erigon:main  # pin; empty = auto-detect from the execution container
+        # required: false                 # true: preimage failure fails the whole run and leaves ELs stopped
