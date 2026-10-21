@@ -1,8 +1,6 @@
 module github.com/ethpandaops/eth-snapshotter
 
-go 1.23.0
-
-toolchain go1.24.1
+go 1.26.10
 
 require (
 	github.com/ethereum/go-ethereum v1.13.15
